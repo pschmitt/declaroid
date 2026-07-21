@@ -388,6 +388,11 @@ version info to offer; F-Droid search comes from `fdroidcl search`, which
 does a fuzzy full-text match against name/summary/description (a query like
 "whatsapp" can surface apps that just mention it, not just apps named it).
 
+Both stores are searched case-insensitively. Google Play's search is
+case-insensitive on its own; F-Droid's isn't (its query is a regexp
+matched case-sensitively by default), so declaroid prefixes it with the
+Go regexp `(?i)` flag.
+
 ### Table output
 
 `declaroid devices` and `declaroid diff` render as a table: using

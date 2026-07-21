@@ -1372,13 +1372,21 @@ search_gplay() {
 # bash's `=~` is greedy, so `(.*) - (.+)$` backtracks from the end and
 # always finds the *last* " - ", giving the right split regardless of how
 # many dashes the title itself contains.
+# The query is matched as a Go regexp (its own --help says so) and is
+# case-sensitive by default -- confirmed empirically: "signal" finds
+# matches, "SIGNAL"/"SiGnAl" find zero, even though the exact same content
+# matches lowercase. gplaydl's Play Store search is already
+# case-insensitive server-side (also confirmed empirically), so only this
+# side needs a fix: prefixing with Go regexp's inline `(?i)` flag turns on
+# case-insensitive matching without otherwise changing how the rest of the
+# query is interpreted.
 search_fdroid() {
   local query="$1"
   local limit="$2"
   local count=0
 
   local -a lines
-  mapfile -t lines < <(fdroidcl search "$query" 2>/dev/null)
+  mapfile -t lines < <(fdroidcl search "(?i)$query" 2>/dev/null)
 
   local line pkg rest name
   for line in "${lines[@]}"
