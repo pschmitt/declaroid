@@ -79,6 +79,16 @@ incomplete change, not a follow-up.
   this possibly-glob, possibly-literal path" -- see `install_local`. This
   class of bug will not show up when testing against your own interactive
   shell; it only shows up running the actual Nix-built binary.
+- `is_system_plumbing_pkg` (used by `generate-config`) is a best-effort,
+  hand-maintained denylist of GMS/AOSP package IDs that show up in
+  `pm list packages -3` despite not being real apps (they get updated via
+  Play but never lose their system-plumbing nature). There is no reliable
+  *technical* signal to detect these -- their install path is `/data/app/…`
+  just like a real sideloaded app once updated, so path-based detection
+  doesn't work either (checked and ruled out). If a new one shows up in
+  someone's `generate-config` output, add its exact package ID to the case
+  statement; don't switch to a path- or prefix-based heuristic without
+  re-verifying against real device output first.
 
 ## Nix packaging
 

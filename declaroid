@@ -60,6 +60,8 @@ ${C_BOLD}Commands:${C_RESET}
               List connected adb devices (serial, model, codename, connection)
   ${C_CYAN}clear-cache${C_RESET} [PKG...]
               Remove cached APK downloads (all of them, or just PKG(s) given)
+  ${C_CYAN}generate-config${C_RESET}
+              Print a YAML config seeded from what's installed on a device
 
 ${C_BOLD}Options:${C_RESET}
   ${C_YELLOW}-c, --config FILE${C_RESET}       Path to the apps YAML config (default: ${DEFAULT_CONFIG})
@@ -68,6 +70,8 @@ ${C_BOLD}Options:${C_RESET}
   ${C_YELLOW}-f, --force-download${C_RESET}    (install only) Re-download even if a cached copy exists
   ${C_YELLOW}-y, --yes, --noconfirm, --no-confirm${C_RESET}
                           (uninstall/clear-cache) Skip the confirmation prompt
+  ${C_YELLOW}-o, --output FILE${C_RESET}       (generate-config only) Write to FILE instead of stdout
+      ${C_YELLOW}--system${C_RESET}            (generate-config only) Include system apps too (default: third-party only)
       ${C_YELLOW}--bulk, --all-devices, --all${C_RESET}
                           Target every device that matches (see below), instead
                           of erroring out on an ambiguous match
@@ -268,7 +272,8 @@ resolve_devices() {
   elif [[ -n "${TARGET_DEVICE:-}" ]]
   then
     query="$TARGET_DEVICE"
-  else
+  elif [[ -n "$config" && -f "$config" ]]
+  then
     local from_yaml
     from_yaml="$(yq -r '.device' "$config")"
     if [[ -n "$from_yaml" && "$from_yaml" != "null" ]]
@@ -1078,6 +1083,187 @@ cmd_diff() {
   done
 }
 
+# `pm list packages -i` reports the installer attribution package, which is
+# a decent (if imperfect) signal for where an app actually came from:
+#   com.android.vending           -> the Play Store app itself       -> gplay
+#   org.fdroid.fdroid             -> the F-Droid client itself       -> fdroid
+#   *obtainium*                   -> Obtainium (GitHub-release apps) -> github
+#   com.google.android.packageinstaller / com.android.packageinstaller / null
+#                                  -> a raw APK was opened/installed directly
+#                                     (adb install, a browser download, ...)
+#                                  -> unknown; declaroid can't recover repo/
+#                                     asset/path from this alone
+store_for_installer() {
+  case "$1" in
+    com.android.vending)
+      printf 'gplay\n'
+      ;;
+    org.fdroid.fdroid)
+      printf 'fdroid\n'
+      ;;
+    *obtainium*)
+      printf 'github\n'
+      ;;
+    *)
+      printf '\n'
+      ;;
+  esac
+}
+
+# Package IDs that are GMS/AOSP system plumbing rather than user-facing
+# apps -- these routinely leak into `pm list packages -3` ("third-party")
+# because they've been updated via the Play Store at some point, which is
+# enough for Android to stop counting them as system packages even though
+# they're not something you'd ever want to declaratively "install". This is
+# a best-effort denylist, not an exhaustive one -- add to it as needed.
+is_system_plumbing_pkg() {
+  case "$1" in
+    com.android.vending | \
+    com.google.android.gms | \
+    com.google.android.gsf | \
+    com.google.android.gsf.login | \
+    com.google.android.webview | \
+    com.google.android.trichromelibrary | \
+    com.google.android.modulemetadata | \
+    com.google.android.safetycore | \
+    com.google.android.contactkeys | \
+    com.android.providers.contactkeys | \
+    com.google.android.apps.work.clouddpc | \
+    com.google.android.ims | \
+    com.google.android.packageinstaller | \
+    com.android.packageinstaller | \
+    com.google.android.partnersetup | \
+    com.google.android.settings.intelligence | \
+    com.google.android.as | \
+    com.google.android.printservice.recommendation | \
+    com.google.android.tag | \
+    com.google.android.feedback | \
+    com.google.android.onetimeinitializer | \
+    com.google.android.configupdater | \
+    com.google.android.ext.services | \
+    com.google.android.ext.shared | \
+    com.google.android.federatedcompute | \
+    com.google.android.odad | \
+    com.google.android.captiveportallogin | \
+    com.google.android.cellbroadcastreceiver | \
+    com.google.android.cellbroadcastservice | \
+    com.google.android.networkstack | \
+    com.google.android.networkstack.permissionconfig | \
+    com.google.android.euicc | \
+    com.google.android.hotspot2.osulogin | \
+    com.google.android.wfcactivation)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+cmd_generate_config() {
+  local cli_device=""
+  local output=""
+  local include_system=""
+
+  while [[ -n "${1:-}" ]]
+  do
+    case "$1" in
+      -h|--help)
+        usage
+        return 0
+        ;;
+      -d|--device)
+        cli_device="$2"
+        shift 2
+        ;;
+      -o|--output)
+        output="$2"
+        shift 2
+        ;;
+      --system)
+        include_system=1
+        shift
+        ;;
+      *)
+        log_error "Unknown option: $1"
+        usage >&2
+        return 2
+        ;;
+    esac
+  done
+
+  check_deps adb
+
+  local device
+  if ! device="$(resolve_devices "$cli_device" "" "")"
+  then
+    return 2
+  fi
+
+  log_step "Generating config from $device"
+
+  local -a scope_flags=(-3)
+  [[ -n "$include_system" ]] && scope_flags=()
+
+  local -a lines
+  mapfile -t lines < <(adb -s "$device" shell pm list packages "${scope_flags[@]}" -i </dev/null 2>/dev/null | tr -d '\r' | sort)
+
+  if [[ ${#lines[@]} -eq 0 ]]
+  then
+    log_error "No packages found on $device"
+    return 1
+  fi
+
+  local yaml
+  yaml="$(
+    printf '# Generated by declaroid generate-config from %s\n' "$device"
+    printf '# App names default to the package id -- edit them to something readable.\n'
+    printf '# store is detected from the installer attribution (pm list packages -i):\n'
+    printf '#   com.android.vending -> gplay, org.fdroid.fdroid -> fdroid, Obtainium -> github.\n'
+    printf '# Entries with a "store unknown" comment were sideloaded directly (adb install,\n'
+    printf '# a browser download, ...) -- there is no way to recover where they actually\n'
+    printf '# came from, so store is left unset (defaults to gplay) and needs a manual look.\n'
+    printf 'device: %s\n' "$device"
+    printf 'apps:\n'
+
+    local line pkg installer store
+    for line in "${lines[@]}"
+    do
+      [[ "$line" =~ ^package:([^[:space:]]+)[[:space:]]+installer=(.*)$ ]] || continue
+      pkg="${BASH_REMATCH[1]}"
+      installer="${BASH_REMATCH[2]}"
+
+      is_system_plumbing_pkg "$pkg" && continue
+
+      store="$(store_for_installer "$installer")"
+
+      printf '  - name: %s\n' "$pkg"
+      printf '    pkg: %s\n' "$pkg"
+      case "$store" in
+        github)
+          printf '    store: github\n'
+          printf '    # installed via Obtainium -- set repo/asset by hand, original repo is unknown\n'
+          printf '    repo: ""\n'
+          ;;
+        "")
+          printf '    # store unknown (installer=%s)\n' "${installer:-none}"
+          ;;
+        *)
+          printf '    store: %s\n' "$store"
+          ;;
+      esac
+    done
+  )"
+
+  if [[ -n "$output" ]]
+  then
+    printf '%s\n' "$yaml" > "$output"
+    log_ok "Wrote config to $output"
+  else
+    printf '%s\n' "$yaml"
+  fi
+}
+
 main() {
   if [[ -z "${1:-}" ]]
   then
@@ -1107,6 +1293,9 @@ main() {
       ;;
     diff)
       cmd_diff "$@"
+      ;;
+    generate-config)
+      cmd_generate_config "$@"
       ;;
     *)
       log_error "Unknown command: $command"

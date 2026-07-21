@@ -119,6 +119,7 @@ $ declaroid COMMAND [OPTIONS]
 | `diff` | Show which configured apps are installed vs missing, no changes made |
 | `devices`, `list` | List connected adb devices (serial, model, codename, connection) |
 | `clear-cache [PKG...]` | Remove cached APK downloads, all of them or just the given package(s) |
+| `generate-config` | Print a YAML config seeded from what's installed on a device |
 
 ### Options
 
@@ -129,8 +130,45 @@ $ declaroid COMMAND [OPTIONS]
 | `--dry-run` | install, uninstall | Print what would happen, don't do it |
 | `-f, --force-download` | install | Re-download even if a cached copy exists |
 | `-y, --yes, --noconfirm, --no-confirm` | uninstall, clear-cache | Skip the confirmation prompt |
+| `-o, --output FILE` | generate-config | Write to FILE instead of stdout |
+| `--system` | generate-config | Include system apps too (default: third-party only) |
 | `--bulk, --all-devices, --all` | all | Target every matching device instead of erroring out on ambiguity |
 | `-h, --help` | all | Show help |
+
+### Generating a config from an existing device
+
+Already have a phone set up the way you want and just want a starting
+`apps.yaml`? `generate-config` lists installed packages (`pm list packages`,
+third-party only by default) and writes one app entry per package:
+
+```console
+$ declaroid generate-config --device redfin -o ~/.config/declaroid/apps.yaml
+```
+
+Package names default to the package ID -- there's no reliable way to
+recover a human-readable app label from the device, so rename them by hand.
+
+`store` is guessed from each app's installer attribution
+(`pm list packages -i`):
+
+| Installer | Detected store |
+|---|---|
+| `com.android.vending` | `gplay` |
+| `org.fdroid.fdroid` | `fdroid` |
+| anything containing `obtainium` | `github` (with a `repo: ""` placeholder -- Obtainium doesn't expose which repo it used, so fill it in by hand) |
+| anything else (`com.google.android.packageinstaller`, `null`, a browser, ...) | left unset, with a `# store unknown (installer=...)` comment -- there's no way to know whether it was `local`, `fdroid`, or `github` from this alone |
+
+A small denylist filters out GMS/AOSP system plumbing that routinely leaks
+into `pm list packages -3` ("third-party") because it's been updated via the
+Play Store at some point (`com.google.android.gms`, `com.android.vending`
+itself, Android Device Policy, Safety Core, and similar background
+components -- see `is_system_plumbing_pkg` in the script). It's a
+best-effort list, not exhaustive; extend it if something obviously-not-an-app
+shows up in your output. Pass `--system` to include system apps in the scan
+in the first place (the denylist still applies on top of that).
+
+Review the output before using it either way -- this is a starting point,
+not a guarantee.
 
 ### Config resolution
 

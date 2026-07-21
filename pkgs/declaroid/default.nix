@@ -2,6 +2,7 @@
   lib,
   stdenvNoCC,
   makeWrapper,
+  installShellFiles,
   android-tools,
   yq-go,
   curl,
@@ -22,7 +23,10 @@ stdenvNoCC.mkDerivation {
 
   src = ../..;
 
-  nativeBuildInputs = [ makeWrapper ];
+  nativeBuildInputs = [
+    makeWrapper
+    installShellFiles
+  ];
 
   dontConfigure = true;
   dontBuild = true;
@@ -31,7 +35,7 @@ stdenvNoCC.mkDerivation {
     runHook preInstall
 
     install -Dm755 declaroid "$out/bin/declaroid"
-    install -Dm644 completions/_declaroid "$out/share/zsh/site-functions/_declaroid"
+    installShellCompletion --zsh completions/_declaroid
     wrapProgram "$out/bin/declaroid" \
       --prefix PATH : ${
         lib.makeBinPath [
