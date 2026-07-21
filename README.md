@@ -101,6 +101,10 @@ dependencies are:
 - [`fdroidcl`](https://github.com/Hoverth/fdroidcl) -- only needed for
   `store: fdroid` apps (declaroid checks for it lazily, only if your config
   actually uses the fdroid store)
+- `aapt2` (nixpkgs: `aapt`) -- optional, only used by `generate-config` to
+  read human-readable app names; falls back to the package ID if missing
+- [`tsvtool`](https://github.com/pschmitt/tsvtool) -- optional, prettier
+  table output for `devices`/`diff`; falls back to `column -t`
 
 Put `declaroid` on your `$PATH` and make sure the above are too.
 
@@ -145,8 +149,13 @@ third-party only by default) and writes one app entry per package:
 $ declaroid generate-config --device redfin -o ~/.config/declaroid/apps.yaml
 ```
 
-Package names default to the package ID -- there's no reliable way to
-recover a human-readable app label from the device, so rename them by hand.
+App names are read from each APK's `application-label` via
+[`aapt2`](https://developer.android.com/tools/aapt2) (part of nixpkgs'
+`aapt` package -- the Nix-built `declaroid` has it out of the box). This
+means pulling every app's `base.apk` off the device, which is slow for large
+apps and adds up across a big app list; pass `--no-labels` to skip it and
+just use the package ID as the name instead (also the automatic fallback if
+`aapt2` isn't installed). Rename whatever comes out wrong or unhelpful.
 
 `store` is guessed from each app's installer attribution
 (`pm list packages -i`):
@@ -210,6 +219,13 @@ without a real Play Asset Delivery pack still get a `-asset.apk` file that's
 byte-identical to the base APK -- declaroid detects and skips exact
 duplicate splits by checksum before installing, so this doesn't cause
 `INSTALL_FAILED_INVALID_APK: Split null was defined multiple times`.
+
+If an app has no splits left after deduping (just the base APK), it's
+installed with `adb install -i com.android.vending` instead of
+`install-multiple`, so a later `generate-config` run correctly recognizes it
+as `gplay` (see [Generating a config](#generating-a-config-from-an-existing-device)).
+This isn't done for split installs: `adb install-multiple -i ... ` was
+tested against a real device and reliably hangs rather than erroring.
 
 #### `fdroid`
 

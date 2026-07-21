@@ -89,13 +89,30 @@ incomplete change, not a follow-up.
   someone's `generate-config` output, add its exact package ID to the case
   statement; don't switch to a path- or prefix-based heuristic without
   re-verifying against real device output first.
+- **`adb install -i <id>`'s installer attribution only sticks if `<id>` is a
+  real, currently-installed package** -- tested against a real device with a
+  made-up id ("declaroid.store.whatever"), which silently ends up
+  installer=null, same as passing no `-i` at all. This is why declaroid only
+  ever passes `-i com.android.vending` (gplay, genuinely always installed)
+  and never a synthetic "this came from declaroid" id for github/local --
+  there's no existing package it could truthfully claim to be. Don't
+  reintroduce a synthetic installer id without re-verifying this; it looked
+  like a good idea and silently does nothing.
+- **`adb install-multiple -i <id>` hangs**, tested twice with different flag
+  orders, real installer id, real device -- not a rejection, an actual hang.
+  `install`'s `-i` works fine; `install-multiple`'s doesn't. This is why `-i`
+  is only ever used for the single-remaining-file-after-dedup case in
+  `install_apk_files`, routed through plain `install` instead of
+  `install-multiple`. See that function's comment before touching this.
 
 ## Nix packaging
 
 - `pkgs/declaroid/default.nix` wraps the script with `makeWrapper`, prefixing
   `PATH` with every runtime dependency (`android-tools`, `yq-go`, `gplaydl`,
-  `fdroidcl`, `curl`, `jq`, `util-linux` for `column`, coreutils, etc) and
-  installs `completions/_declaroid` to `share/zsh/site-functions/_declaroid`.
+  `fdroidcl`, `curl`, `jq`, `util-linux` for `column`, `aapt` -- which,
+  confusingly, only actually provides an `aapt2` binary -- for
+  `generate-config`'s name resolution, coreutils, etc) and installs
+  `completions/_declaroid` to `share/zsh/site-functions/_declaroid`.
   If the script starts shelling out to something new, add it to the
   `makeBinPath` list too -- and remember the wrapped runtime is plain
   nixpkgs `bash`, not your interactive shell's bash (see the `compgen` note

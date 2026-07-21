@@ -72,6 +72,7 @@ ${C_BOLD}Options:${C_RESET}
                           (uninstall/clear-cache) Skip the confirmation prompt
   ${C_YELLOW}-o, --output FILE${C_RESET}       (generate-config only) Write to FILE instead of stdout
       ${C_YELLOW}--system${C_RESET}            (generate-config only) Include system apps too (default: third-party only)
+      ${C_YELLOW}--no-labels${C_RESET}         (generate-config only) Skip resolving app names via aapt2, use the package id instead (faster)
       ${C_YELLOW}--bulk, --all-devices, --all${C_RESET}
                           Target every device that matches (see below), instead
                           of erroring out on an ambiguous match
@@ -393,10 +394,33 @@ fetch_app() {
   printf '%s\n' "$cache_dir"
 }
 
-# Takes a list of APK file paths (a real argument -- computed data, not
-# per-app config -- unlike the CURRENT_*/DEVICE_SERIAL/etc convention used
-# elsewhere), dedupes them by checksum, and installs the survivors.
+# Takes an installer attribution package id (may be empty -- see below) and
+# a list of APK file paths (computed data, not per-app config, unlike the
+# CURRENT_*/DEVICE_SERIAL/etc convention used elsewhere), dedupes the files
+# by checksum, and installs the survivors.
+#
+# `adb install -i <id> -r <file>` sets the installer attribution (visible
+# later via `pm list packages -i`, and read back by
+# store_for_installer/generate-config) -- but only if <id> is a real,
+# currently-installed package; Android silently drops the attribution
+# (installer ends up null) for a made-up id, tested against a real device
+# with a synthetic "declaroid.store.whatever" string. That rules out
+# attributing github/local installs to declaroid itself: there's no
+# existing installed package we could truthfully claim to be. gplay is the
+# one case this is worth doing, since com.android.vending genuinely is
+# installed on any real device -- `installer` is only ever passed as
+# "com.android.vending" or "" by callers, never a synthetic id.
+#
+# Separately: `adb install-multiple -i <id> -r <files...>` was tested and
+# reliably *hangs* instead of erroring, regardless of flag order, even with
+# a real installer id. So -i is only ever used for the single-APK case,
+# routed through plain `install`; a real split install always goes through
+# `install-multiple` with no installer attribution at all (matching prior
+# behavior). Don't add -i to the install-multiple branch without re-testing
+# against a real device first.
 install_apk_files() {
+  local installer="$1"
+  shift
   local -a files=("$@")
   local -A seen_hashes
   local -a keep_files
@@ -424,11 +448,17 @@ install_apk_files() {
     return 1
   fi
 
-  adb -s "$DEVICE_SERIAL" install-multiple -r "${keep_files[@]}"
+  if [[ ${#keep_files[@]} -eq 1 && -n "$installer" ]]
+  then
+    adb -s "$DEVICE_SERIAL" install -r -i "$installer" "${keep_files[0]}"
+  else
+    adb -s "$DEVICE_SERIAL" install-multiple -r "${keep_files[@]}"
+  fi
 }
 
 install_splits() {
-  local dir="$1"
+  local installer="$1"
+  local dir="$2"
   local -a files
   local -a obb_files
 
@@ -440,7 +470,7 @@ install_splits() {
     return 1
   fi
 
-  if ! install_apk_files "${files[@]}"
+  if ! install_apk_files "$installer" "${files[@]}"
   then
     return 1
   fi
@@ -461,9 +491,12 @@ install_gplay() {
     return 1
   fi
 
-  install_splits "$cache_dir"
+  install_splits com.android.vending "$cache_dir"
 }
 
+# fdroidcl does its own `adb install` internally with no installer flag, so
+# fdroid-sourced apps always end up with installer=null -- nothing declaroid
+# can do about that without patching fdroidcl itself.
 install_fdroid() {
   ANDROID_SERIAL="$DEVICE_SERIAL" fdroidcl install "$CURRENT_PKG"
 }
@@ -494,7 +527,8 @@ install_local() {
     return 1
   fi
 
-  install_apk_files "${apks[@]}"
+  # No installer attribution here either -- same reason as install_github.
+  install_apk_files "" "${apks[@]}"
 }
 
 fetch_github_release() {
@@ -592,6 +626,10 @@ install_github() {
     return 1
   fi
 
+  # No -i here: Android silently drops installer attribution unless the
+  # claimed installer is a real, currently-installed package (tested --
+  # a synthetic "declaroid.store.github" id is just ignored, ending up
+  # installer=null same as if we hadn't passed -i at all).
   adb -s "$DEVICE_SERIAL" install -r "${apks[0]}"
 }
 
@@ -1090,7 +1128,11 @@ cmd_diff() {
 #   *obtainium*                   -> Obtainium (GitHub-release apps) -> github
 #   com.google.android.packageinstaller / com.android.packageinstaller / null
 #                                  -> a raw APK was opened/installed directly
-#                                     (adb install, a browser download, ...)
+#                                     (adb install, a browser download, ...),
+#                                     including declaroid-installed github/
+#                                     local apps and split (install-multiple)
+#                                     gplay apps -- see install_apk_files's
+#                                     comment for why those can't set -i
 #                                  -> unknown; declaroid can't recover repo/
 #                                     asset/path from this alone
 store_for_installer() {
@@ -1151,7 +1193,9 @@ is_system_plumbing_pkg() {
     com.google.android.networkstack.permissionconfig | \
     com.google.android.euicc | \
     com.google.android.hotspot2.osulogin | \
-    com.google.android.wfcactivation)
+    com.google.android.wfcactivation | \
+    com.google.android.apps.accessibility.voiceaccess | \
+    com.google.android.apps.healthdata)
       return 0
       ;;
     *)
@@ -1160,10 +1204,58 @@ is_system_plumbing_pkg() {
   esac
 }
 
+# Wraps a string as a double-quoted YAML scalar, escaping backslashes and
+# double quotes. Used for `name`, since it's an arbitrary human-readable
+# string (unlike `pkg`, which is always a safe bare identifier).
+yaml_quote_scalar() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '"%s"\n' "$s"
+}
+
+# Pulls a package's base.apk and reads its default (unlocalized)
+# application-label via aapt2. Slow (transfers the whole APK -- can be
+# 100+ MB) and best-effort: prints nothing and returns non-zero on any
+# failure, so callers should fall back to the package id as the name.
+resolve_app_label() {
+  local device="$1"
+  local pkg="$2"
+  local apk_path tmp_apk label
+
+  apk_path="$(adb -s "$device" shell pm path "$pkg" </dev/null 2>/dev/null | head -1 | tr -d '\r')"
+  apk_path="${apk_path#package:}"
+
+  if [[ -z "$apk_path" ]]
+  then
+    return 1
+  fi
+
+  tmp_apk="$(mktemp --suffix=.apk)"
+
+  if ! adb -s "$device" pull "$apk_path" "$tmp_apk" >/dev/null 2>&1
+  then
+    rm -f "$tmp_apk"
+    return 1
+  fi
+
+  label="$(aapt2 dump badging "$tmp_apk" 2>/dev/null | grep -m1 "^application-label:")"
+  rm -f "$tmp_apk"
+
+  if [[ "$label" =~ ^application-label:\'(.*)\'$ ]]
+  then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+
+  return 1
+}
+
 cmd_generate_config() {
   local cli_device=""
   local output=""
   local include_system=""
+  local resolve_names=1
 
   while [[ -n "${1:-}" ]]
   do
@@ -1184,6 +1276,10 @@ cmd_generate_config() {
         include_system=1
         shift
         ;;
+      --no-labels)
+        resolve_names=""
+        shift
+        ;;
       *)
         log_error "Unknown option: $1"
         usage >&2
@@ -1198,6 +1294,12 @@ cmd_generate_config() {
   if ! device="$(resolve_devices "$cli_device" "" "")"
   then
     return 2
+  fi
+
+  if [[ -n "$resolve_names" ]] && ! command -v aapt2 >/dev/null 2>&1
+  then
+    log_warn "aapt2 not found, app names will default to the package id (install aapt2 or pass --no-labels to silence this)"
+    resolve_names=""
   fi
 
   log_step "Generating config from $device"
@@ -1217,7 +1319,13 @@ cmd_generate_config() {
   local yaml
   yaml="$(
     printf '# Generated by declaroid generate-config from %s\n' "$device"
-    printf '# App names default to the package id -- edit them to something readable.\n'
+    if [[ -n "$resolve_names" ]]
+    then
+      printf '# App names were read from each APK (aapt2); rename any that came out\n'
+      printf '# wrong or unhelpful.\n'
+    else
+      printf '# App names default to the package id -- edit them to something readable.\n'
+    fi
     printf '# store is detected from the installer attribution (pm list packages -i):\n'
     printf '#   com.android.vending -> gplay, org.fdroid.fdroid -> fdroid, Obtainium -> github.\n'
     printf '# Entries with a "store unknown" comment were sideloaded directly (adb install,\n'
@@ -1226,7 +1334,7 @@ cmd_generate_config() {
     printf 'device: %s\n' "$device"
     printf 'apps:\n'
 
-    local line pkg installer store
+    local line pkg installer store name
     for line in "${lines[@]}"
     do
       [[ "$line" =~ ^package:([^[:space:]]+)[[:space:]]+installer=(.*)$ ]] || continue
@@ -1237,7 +1345,18 @@ cmd_generate_config() {
 
       store="$(store_for_installer "$installer")"
 
-      printf '  - name: %s\n' "$pkg"
+      name="$pkg"
+      if [[ -n "$resolve_names" ]]
+      then
+        log_step "Resolving app name for $pkg"
+        local resolved
+        if resolved="$(resolve_app_label "$device" "$pkg")" && [[ -n "$resolved" ]]
+        then
+          name="$resolved"
+        fi
+      fi
+
+      printf '  - name: %s\n' "$(yaml_quote_scalar "$name")"
       printf '    pkg: %s\n' "$pkg"
       case "$store" in
         github)

@@ -13,6 +13,7 @@
   gnused,
   findutils,
   util-linux,
+  aapt,
   gplaydl,
   fdroidcl,
 }:
@@ -49,6 +50,7 @@ stdenvNoCC.mkDerivation {
           gnused
           findutils
           util-linux
+          aapt
           gplaydl
           fdroidcl
         ]
