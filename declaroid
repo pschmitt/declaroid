@@ -1464,13 +1464,14 @@ cmd_generate_config() {
     fi
     printf '# store is detected from the installer attribution (pm list packages -i):\n'
     printf '#   com.android.vending -> gplay, org.fdroid.fdroid -> fdroid, Obtainium -> github.\n'
-    printf '# Entries with a "store unknown" comment were sideloaded directly (adb install,\n'
-    printf '# a browser download, ...) -- there is no way to recover where they actually\n'
-    printf '# came from, so store is left unset (defaults to gplay) and needs a manual look.\n'
+    printf '# Entries marked with a "# TODO" are commented out: reinstalling from this\n'
+    printf '# config as-is would fail for them (store could not be determined, or a\n'
+    printf '# github repo/asset could not be recovered) -- fix them up and uncomment.\n'
     printf 'device: %s\n' "$device"
     printf 'apps:\n'
 
-    local store name resolved
+    local store name resolved todo
+    local -a entry_lines
     for pkg in "${keep_pkgs[@]}"
     do
       installer="${pkg_installer[$pkg]}"
@@ -1482,21 +1483,32 @@ cmd_generate_config() {
         name="$resolved"
       fi
 
-      printf '  - name: %s\n' "$(yaml_quote_scalar "$name")"
-      printf '    pkg: %s\n' "$pkg"
+      todo=""
+      entry_lines=("  - name: $(yaml_quote_scalar "$name")" "    pkg: $pkg")
       case "$store" in
         github)
-          printf '    store: github\n'
-          printf '    # installed via Obtainium -- set repo/asset by hand, original repo is unknown\n'
-          printf '    repo: ""\n'
+          entry_lines+=("    store: github" '    repo: ""')
+          todo="installed via Obtainium -- set repo/asset by hand, original repo is unknown"
           ;;
         "")
-          printf '    # store unknown (installer=%s)\n' "${installer:-none}"
+          todo="store unknown (installer=${installer:-none}) -- set store by hand"
           ;;
         *)
-          printf '    store: %s\n' "$store"
+          entry_lines+=("    store: $store")
           ;;
       esac
+
+      if [[ -n "$todo" ]]
+      then
+        printf '  # TODO: %s\n' "$todo"
+        local eline
+        for eline in "${entry_lines[@]}"
+        do
+          printf '  # %s\n' "${eline#  }"
+        done
+      else
+        printf '%s\n' "${entry_lines[@]}"
+      fi
     done
   )"
 

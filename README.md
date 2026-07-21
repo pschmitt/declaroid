@@ -175,8 +175,13 @@ Rename whatever comes out wrong or unhelpful.
 |---|---|
 | `com.android.vending` | `gplay` |
 | `org.fdroid.fdroid` | `fdroid` |
-| anything containing `obtainium` | `github` (with a `repo: ""` placeholder -- Obtainium doesn't expose which repo it used, so fill it in by hand) |
-| anything else (`com.google.android.packageinstaller`, `null`, a browser, ...) | left unset, with a `# store unknown (installer=...)` comment -- there's no way to know whether it was `local`, `fdroid`, or `github` from this alone |
+| anything containing `obtainium` | `github`, but Obtainium doesn't expose which repo it used |
+| anything else (`com.google.android.packageinstaller`, `null`, a browser, ...) | unknown -- there's no way to tell `local`/`fdroid`/`github` apart from this alone |
+
+Reinstalling from this config as-is would fail for the last two cases (no
+`repo` to fetch, or no `store` at all), so those entries are written out
+**commented out**, with a `# TODO: ...` line explaining why right above
+them -- fill in the missing piece and uncomment to include them.
 
 A small denylist filters out GMS/AOSP system plumbing that routinely leaks
 into `pm list packages -3` ("third-party") because it's been updated via the

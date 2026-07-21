@@ -89,6 +89,15 @@ incomplete change, not a follow-up.
   someone's `generate-config` output, add its exact package ID to the case
   statement; don't switch to a path- or prefix-based heuristic without
   re-verifying against real device output first.
+- **`generate-config` entries that would fail a real `install` are written
+  out commented out, with a `# TODO: <reason>` line above them** -- not
+  emitted active with `store` silently defaulted to `gplay`. Concretely:
+  unknown-store entries (no way to tell `local`/`fdroid`/`github` apart) and
+  `github` entries with an empty `repo: ""` placeholder (Obtainium doesn't
+  expose the source repo). The point is that feeding a freshly generated
+  config straight into `install` should never itself produce errors; if you
+  add a new "we don't actually have enough info" case, comment it out the
+  same way rather than emitting a guess.
 - **`adb install -i <id>`'s installer attribution only sticks if `<id>` is a
   real, currently-installed package** -- tested against a real device with a
   made-up id ("declaroid.store.whatever"), which silently ends up
