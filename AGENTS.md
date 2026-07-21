@@ -152,7 +152,14 @@ incomplete change, not a follow-up.
   it'll be needlessly slow for a device with many apps. If an app turns up
   in more than one enumerated profile but not literally all of them, it
   still gets `profile: all` (the closest value a single `--user` flag can
-  express) rather than trying to encode a specific subset.
+  express) rather than trying to encode a specific subset. **The "all"
+  check must be guarded by `${#profile_ids[@]} -gt 1`** -- on a
+  single-profile device, every found app trivially has `app_profiles`
+  length 1, which satisfies `-ge ${#profile_ids[@]}` (also 1) for every
+  single app, so nearly the whole config came out `profile: all` on a real
+  single-profile device before this guard was added (24 of 25 apps).
+  `profile_field` must stay unset whenever there's only one profile to
+  begin with -- there's nothing to distinguish.
 - `--sort-by` (`cmd_diff`, `cmd_devices`) pipes the *data rows only* through
   `sort -t $'\t' -k<N>,<N> -f` -- the header row (`printf` outside that
   inner pipe) must never enter the sort, or it'll end up sorted into the

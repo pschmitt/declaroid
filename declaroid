@@ -1886,20 +1886,30 @@ cmd_generate_config() {
       # shellcheck disable=SC2206
       app_profiles=(${pkg_profiles[$pkg]})
       profile_field=""
-      if [[ ${#app_profiles[@]} -ge ${#profile_ids[@]} ]]
+      # A device with only one enumerated profile has nothing to distinguish
+      # -- every app trivially "is in every profile", so app_profiles is
+      # always length 1 there and profile_field must stay unset. Without
+      # this guard, ${#app_profiles[@]} -ge ${#profile_ids[@]} is vacuously
+      # true whenever profile_ids has length 1, marking almost every app
+      # profile: all on single-profile devices (confirmed on a real device
+      # with no secondary user/Work Profile: 24 of 25 apps got profile: all).
+      if [[ ${#profile_ids[@]} -gt 1 ]]
       then
-        profile_field="all"
-      elif [[ ${#app_profiles[@]} -gt 1 ]]
-      then
-        # In more than one profile but (per the check above) not literally
-        # every enumerated one -- "all" is the closest value expressible via
-        # a single --user flag; worst case a reinstall also lands in an
-        # extra profile that happened not to have it, which is an
-        # acceptable simplification for a "review before use" starting point.
-        profile_field="all"
-      elif [[ ${#app_profiles[@]} -eq 1 && "${app_profiles[0]}" != "$current_profile" ]]
-      then
-        profile_field="${id_to_name[${app_profiles[0]}]:-${app_profiles[0]}}"
+        if [[ ${#app_profiles[@]} -ge ${#profile_ids[@]} ]]
+        then
+          profile_field="all"
+        elif [[ ${#app_profiles[@]} -gt 1 ]]
+        then
+          # In more than one profile but (per the check above) not literally
+          # every enumerated one -- "all" is the closest value expressible via
+          # a single --user flag; worst case a reinstall also lands in an
+          # extra profile that happened not to have it, which is an
+          # acceptable simplification for a "review before use" starting point.
+          profile_field="all"
+        elif [[ ${#app_profiles[@]} -eq 1 && "${app_profiles[0]}" != "$current_profile" ]]
+        then
+          profile_field="${id_to_name[${app_profiles[0]}]:-${app_profiles[0]}}"
+        fi
       fi
 
       todo=""
