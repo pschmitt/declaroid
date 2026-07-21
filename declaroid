@@ -46,54 +46,61 @@ log_error() {
 
 usage() {
   cat <<EOF
-Usage: declaroid COMMAND [OPTIONS]
+${C_BOLD}Usage:${C_RESET} ${C_GREEN}declaroid${C_RESET} COMMAND [OPTIONS]
 
 Declarative Android app provisioning: define apps in YAML, install/uninstall
 them onto a device via adb, fetching from Google Play (gplaydl), F-Droid
-(fdroidcl), or GitHub release assets.
+(fdroidcl), a GitHub repo's release assets, or a local APK file.
 
-Commands:
-  install     Download (if not already cached) and install configured apps
-  uninstall   Uninstall configured apps (no download)
-  clear-cache [PKG...]
+${C_BOLD}Commands:${C_RESET}
+  ${C_CYAN}install${C_RESET}     Download (if not already cached) and install configured apps
+  ${C_CYAN}uninstall${C_RESET}   Uninstall configured apps (no download)
+  ${C_CYAN}diff${C_RESET}        Show which configured apps are installed vs missing, no changes made
+  ${C_CYAN}devices${C_RESET}, ${C_CYAN}list${C_RESET}
+              List connected adb devices (serial, model, codename, connection)
+  ${C_CYAN}clear-cache${C_RESET} [PKG...]
               Remove cached APK downloads (all of them, or just PKG(s) given)
 
-Options:
-  -c, --config FILE       Path to the apps YAML config (default: ${DEFAULT_CONFIG})
-  -d, --device QUERY      Target device (also settable via \$TARGET_DEVICE)
-      --dry-run           Print what would happen without downloading/installing/uninstalling
-  -f, --force-download    (install only) Re-download even if a cached copy exists
-  -y, --yes, --noconfirm, --no-confirm
+${C_BOLD}Options:${C_RESET}
+  ${C_YELLOW}-c, --config FILE${C_RESET}       Path to the apps YAML config (default: ${DEFAULT_CONFIG})
+  ${C_YELLOW}-d, --device QUERY${C_RESET}      Target device (also settable via \$TARGET_DEVICE)
+      ${C_YELLOW}--dry-run${C_RESET}           Print what would happen without downloading/installing/uninstalling
+  ${C_YELLOW}-f, --force-download${C_RESET}    (install only) Re-download even if a cached copy exists
+  ${C_YELLOW}-y, --yes, --noconfirm, --no-confirm${C_RESET}
                           (uninstall/clear-cache) Skip the confirmation prompt
-      --bulk, --all-devices, --all
+      ${C_YELLOW}--bulk, --all-devices, --all${C_RESET}
                           Target every device that matches (see below), instead
                           of erroring out on an ambiguous match
-  -h, --help              Show this help
+  ${C_YELLOW}-h, --help${C_RESET}              Show this help
 
-Config resolution order: --config, \$DECLAROID_CONFIG,
+${C_BOLD}Config resolution order:${C_RESET} --config, \$DECLAROID_CONFIG,
 ${XDG_CONFIG_HOME:-\$HOME/.config}/declaroid/apps.yaml
 
-Device resolution order: --device, \$TARGET_DEVICE, .device in the config.
+${C_BOLD}Device resolution order:${C_RESET} --device, \$TARGET_DEVICE, .device in the config.
 The value is matched as a case-insensitive substring against each connected
 device's serial, USB path, product, model, and codename (e.g. "redfin",
-"clover", an IP, or part of a serial) -- so it doesn't need to be exact.
+"clover", an IP, or part of a serial) -- so it doesn't need to be exact. Run
+${C_CYAN}declaroid devices${C_RESET} to see what's connected and matchable.
 If it matches more than one connected device, declaroid errors out unless
 --bulk/--all-devices/--all is given, in which case every match is used.
 If nothing resolves at all, you'll be prompted to pick from connected
 devices (or, with --bulk, every connected device is used).
 
-Config schema:
+${C_BOLD}Config schema:${C_RESET}
   device: <adb serial or substring query>   # optional, see device resolution above
-  store: gplay|fdroid|github                # optional top-level default, defaults to gplay
+  store: gplay|fdroid|github|local           # optional top-level default, defaults to gplay
   apps:
     - name: <display name>
       pkg: <package id>
-      store: gplay|fdroid|github    # optional, overrides the top-level default
+      store: gplay|fdroid|github|local  # optional, overrides the top-level default
       repo: <owner>/<repo>          # required when store is github
       asset: <regex>                # (github only) selects the release asset;
                                      # default: '\\.apk\$'. Must match exactly one
                                      # asset -- narrow it for multi-arch/multi-flavor
                                      # releases (e.g. debug vs release, per-ABI apks).
+      path: <file, glob, or dir>    # required when store is local; a single apk
+                                     # file, a glob matching one or more splits, or
+                                     # a directory (every *.apk directly inside it).
 
 github releases are queried via the GitHub API; set \$GITHUB_TOKEN to raise
 the unauthenticated rate limit or access private repos. If a repo has no
@@ -102,7 +109,10 @@ used instead.
 
 APKs downloaded from gplay/github are cached under ${CACHE_ROOT}/<package-id>/
 so repeated installs don't re-download (see --force-download). fdroid apps
-are cached by fdroidcl itself.
+are cached by fdroidcl itself; local apps aren't cached (nothing to cache).
+
+Table output (devices, diff) is rendered with tsvtool if it's on \$PATH
+(https://github.com/pschmitt/tsvtool), otherwise with column -t.
 EOF
 }
 
@@ -157,6 +167,62 @@ format_device_line() {
   else
     printf '%s\n' "$serial"
   fi
+}
+
+# Pretty-prints TSV (with a header row) read from stdin. Uses tsvtool if it's
+# on PATH (https://github.com/pschmitt/tsvtool), otherwise falls back to
+# column -t with a bolded header, otherwise just passes the TSV through.
+render_table() {
+  local data
+  data="$(cat)"
+
+  if [[ -z "$data" ]]
+  then
+    return 0
+  fi
+
+  if command -v tsvtool >/dev/null 2>&1
+  then
+    local -a args=(pretty)
+    [[ -z "$C_RESET" ]] && args+=(--no-color)
+    printf '%s\n' "$data" | tsvtool "${args[@]}"
+    return 0
+  fi
+
+  if command -v column >/dev/null 2>&1
+  then
+    local -a rendered
+    mapfile -t rendered < <(printf '%s\n' "$data" | column -t -s $'\t')
+
+    if [[ ${#rendered[@]} -gt 0 ]]
+    then
+      printf '%s%s%s\n' "$C_BOLD" "${rendered[0]}" "$C_RESET"
+      if [[ ${#rendered[@]} -gt 1 ]]
+      then
+        printf '%s\n' "${rendered[@]:1}"
+      fi
+    fi
+    return 0
+  fi
+
+  printf '%s\n' "$data"
+}
+
+# Colorizes a whole-word match in already-rendered (aligned) text, read from
+# stdin. Safe to run on tsvtool's own colored output too: if the word is
+# already wrapped in ANSI codes there, the whitespace-boundary match simply
+# won't fire, so this is a no-op rather than a corruption in that case.
+colorize_word() {
+  local word="$1"
+  local color="$2"
+
+  if [[ -z "$color" ]]
+  then
+    cat
+    return 0
+  fi
+
+  sed -E "s/(^|[[:space:]])(${word})([[:space:]]|\$)/\\1${color}\\2${C_RESET}\\3/"
 }
 
 prompt_pick_device() {
@@ -293,13 +359,18 @@ cache_dir_for() {
   printf '%s/%s\n' "$CACHE_ROOT" "$pkg"
 }
 
-fetch_app() {
-  local pkg="$1"
-  local force="$2"
-  local cache_dir
-  cache_dir="$(cache_dir_for "$pkg")"
+has_apk_files() {
+  local dir="$1"
+  local -a existing=("$dir"/*.apk)
 
-  if [[ -z "$force" ]] && compgen -G "$cache_dir/*.apk" >/dev/null 2>&1
+  [[ -e "${existing[0]}" ]]
+}
+
+fetch_app() {
+  local cache_dir
+  cache_dir="$(cache_dir_for "$CURRENT_PKG")"
+
+  if [[ -z "$FORCE_DOWNLOAD" ]] && has_apk_files "$cache_dir"
   then
     log_step "Using cached download in $cache_dir"
     printf '%s\n' "$cache_dir"
@@ -308,24 +379,25 @@ fetch_app() {
 
   mkdir -p "$cache_dir"
 
-  if ! gplaydl download "$pkg" -o "$cache_dir" >&2
+  if ! gplaydl download "$CURRENT_PKG" -o "$cache_dir" >&2
   then
-    log_error "Failed to download $pkg"
+    log_error "Failed to download $CURRENT_PKG"
     return 1
   fi
 
   printf '%s\n' "$cache_dir"
 }
 
-install_splits() {
-  local device="$1"
-  local dir="$2"
+# Takes a list of APK file paths (a real argument -- computed data, not
+# per-app config -- unlike the CURRENT_*/DEVICE_SERIAL/etc convention used
+# elsewhere), dedupes them by checksum, and installs the survivors.
+install_apk_files() {
+  local -a files=("$@")
   local -A seen_hashes
   local -a keep_files
-  local -a obb_files
   local f hash base
 
-  for f in "$dir"/*.apk
+  for f in "${files[@]}"
   do
     [[ -e "$f" ]] || continue
     hash="$(sha256sum "$f" | cut -d' ' -f1)"
@@ -343,11 +415,30 @@ install_splits() {
 
   if [[ ${#keep_files[@]} -eq 0 ]]
   then
+    log_error "No APK files to install"
+    return 1
+  fi
+
+  adb -s "$DEVICE_SERIAL" install-multiple -r "${keep_files[@]}"
+}
+
+install_splits() {
+  local dir="$1"
+  local -a files
+  local -a obb_files
+
+  mapfile -t files < <(find "$dir" -maxdepth 1 -iname '*.apk' | sort)
+
+  if [[ ${#files[@]} -eq 0 ]]
+  then
     log_error "No APK files found in $dir"
     return 1
   fi
 
-  adb -s "$device" install-multiple -r "${keep_files[@]}"
+  if ! install_apk_files "${files[@]}"
+  then
+    return 1
+  fi
 
   mapfile -t obb_files < <(find "$dir" -maxdepth 1 -iname '*.obb')
   if [[ ${#obb_files[@]} -gt 0 ]]
@@ -358,30 +449,53 @@ install_splits() {
 }
 
 install_gplay() {
-  local pkg="$1"
-  local device="$2"
-  local force="$3"
   local cache_dir
 
-  if ! cache_dir="$(fetch_app "$pkg" "$force")"
+  if ! cache_dir="$(fetch_app)"
   then
     return 1
   fi
 
-  install_splits "$device" "$cache_dir"
+  install_splits "$cache_dir"
 }
 
 install_fdroid() {
-  local pkg="$1"
-  local device="$2"
+  ANDROID_SERIAL="$DEVICE_SERIAL" fdroidcl install "$CURRENT_PKG"
+}
 
-  ANDROID_SERIAL="$device" fdroidcl install "$pkg"
+install_local() {
+  local -a apks
+
+  if [[ -z "$CURRENT_PATH" ]]
+  then
+    log_error "store: local requires a 'path'"
+    return 1
+  fi
+
+  if [[ -d "$CURRENT_PATH" ]]
+  then
+    mapfile -t apks < <(find "$CURRENT_PATH" -maxdepth 1 -iname '*.apk' | sort)
+  else
+    # $CURRENT_PATH may be a plain file path or a glob pattern (e.g.
+    # "/dir/*.apk"); routing both through find -name on the parent dir
+    # handles either case without word-splitting/quoting hazards, unlike
+    # unquoted brace/glob expansion of an arbitrary variable would.
+    mapfile -t apks < <(find "$(dirname -- "$CURRENT_PATH")" -maxdepth 1 -name "$(basename -- "$CURRENT_PATH")" | sort)
+  fi
+
+  if [[ ${#apks[@]} -eq 0 ]]
+  then
+    log_error "No APK files found at '$CURRENT_PATH'"
+    return 1
+  fi
+
+  install_apk_files "${apks[@]}"
 }
 
 fetch_github_release() {
-  local repo="$1"
-  local asset_pattern="$2"
-  local cache_dir="$3"
+  local repo="$CURRENT_REPO"
+  local asset_pattern="$CURRENT_ASSET"
+  local cache_dir="$1"
   local -a curl_args=(--fail --silent --show-error --location)
 
   if [[ -n "${GITHUB_TOKEN:-}" ]]
@@ -443,25 +557,20 @@ fetch_github_release() {
 }
 
 install_github() {
-  local pkg="$1"
-  local repo="$2"
-  local asset_pattern="$3"
-  local device="$4"
-  local force="$5"
   local cache_dir
-  cache_dir="$(cache_dir_for "$pkg")"
+  cache_dir="$(cache_dir_for "$CURRENT_PKG")"
 
-  if [[ -z "$repo" ]]
+  if [[ -z "$CURRENT_REPO" ]]
   then
-    log_error "$pkg uses store: github but has no 'repo' set"
+    log_error "$CURRENT_PKG uses store: github but has no 'repo' set"
     return 1
   fi
 
-  if [[ -n "$force" ]] || ! compgen -G "$cache_dir/*.apk" >/dev/null 2>&1
+  if [[ -n "$FORCE_DOWNLOAD" ]] || ! has_apk_files "$cache_dir"
   then
     mkdir -p "$cache_dir"
     rm -f "$cache_dir"/*.apk
-    if ! fetch_github_release "$repo" "$asset_pattern" "$cache_dir"
+    if ! fetch_github_release "$cache_dir"
     then
       return 1
     fi
@@ -478,106 +587,117 @@ install_github() {
     return 1
   fi
 
-  adb -s "$device" install -r "${apks[0]}"
+  adb -s "$DEVICE_SERIAL" install -r "${apks[0]}"
 }
 
+# Reads its per-app inputs from CURRENT_NAME/CURRENT_PKG/CURRENT_STORE/
+# CURRENT_REPO/CURRENT_ASSET/CURRENT_PATH (set by for_each_app's read loop)
+# and its run-wide context from DEVICE_SERIAL/DRY_RUN/FORCE_DOWNLOAD (set by
+# cmd_install before calling for_each_app). See AGENTS.md for why -- this
+# replaced a positional-argument chain that kept growing every time a store
+# needed one more piece of config.
 install_app() {
-  local name="$1"
-  local pkg="$2"
-  local store="$3"
-  local repo="$4"
-  local asset="$5"
-  local device="$6"
-  local dry_run="$7"
-  local force="$8"
   local rc=0
 
-  if is_installed "$device" "$pkg"
+  if is_installed "$DEVICE_SERIAL" "$CURRENT_PKG"
   then
-    log_skip "$name ($pkg) already installed"
+    log_skip "$CURRENT_NAME ($CURRENT_PKG) already installed"
     return 0
   fi
 
-  log_step "Installing $name ($pkg) [$store]"
+  log_step "Installing $CURRENT_NAME ($CURRENT_PKG) [$CURRENT_STORE]"
 
-  if [[ -n "$dry_run" ]]
+  if [[ -n "$DRY_RUN" ]]
   then
-    printf '  would install %s via %s\n' "$pkg" "$store"
+    printf '  would install %s via %s\n' "$CURRENT_PKG" "$CURRENT_STORE"
     return 0
   fi
 
-  case "$store" in
+  case "$CURRENT_STORE" in
     gplay)
-      install_gplay "$pkg" "$device" "$force" || rc=$?
+      install_gplay || rc=$?
       ;;
     fdroid)
-      install_fdroid "$pkg" "$device" || rc=$?
+      install_fdroid || rc=$?
       ;;
     github)
-      install_github "$pkg" "$repo" "$asset" "$device" "$force" || rc=$?
+      install_github || rc=$?
+      ;;
+    local)
+      install_local || rc=$?
       ;;
     *)
-      log_error "Unknown store '$store' for $pkg (expected gplay, fdroid, or github)"
+      log_error "Unknown store '$CURRENT_STORE' for $CURRENT_PKG (expected gplay, fdroid, github, or local)"
       rc=1
       ;;
   esac
 
   if [[ $rc -eq 0 ]]
   then
-    log_ok "$name ($pkg) installed"
+    log_ok "$CURRENT_NAME ($CURRENT_PKG) installed"
   fi
 
   return "$rc"
 }
 
+# See install_app's comment -- same convention, repo/asset/path are unused
+# here (uninstalling doesn't care what store an app came from).
 uninstall_app() {
-  local name="$1"
-  local pkg="$2"
-  local _store="$3"
-  local _repo="$4"
-  local _asset="$5"
-  local device="$6"
-  local dry_run="$7"
-
-  if ! is_installed "$device" "$pkg"
+  if ! is_installed "$DEVICE_SERIAL" "$CURRENT_PKG"
   then
-    log_skip "$name ($pkg) not installed"
+    log_skip "$CURRENT_NAME ($CURRENT_PKG) not installed"
     return 0
   fi
 
-  log_step "Uninstalling $name ($pkg)"
+  log_step "Uninstalling $CURRENT_NAME ($CURRENT_PKG)"
 
-  if [[ -n "$dry_run" ]]
+  if [[ -n "$DRY_RUN" ]]
   then
-    printf '  would uninstall %s\n' "$pkg"
+    printf '  would uninstall %s\n' "$CURRENT_PKG"
     return 0
   fi
 
-  if adb -s "$device" uninstall "$pkg"
+  if adb -s "$DEVICE_SERIAL" uninstall "$CURRENT_PKG"
   then
-    log_ok "$name ($pkg) uninstalled"
+    log_ok "$CURRENT_NAME ($CURRENT_PKG) uninstalled"
   else
     return 1
   fi
 }
 
+# Emits the configured apps as one row per app: name, pkg, store (defaulted),
+# repo, asset (defaulted), path -- joined with U+00A7 (SECTION SIGN), not a
+# tab. Several of these fields (repo/asset/path) are legitimately empty for
+# most stores, and bash's `read` collapses consecutive *whitespace* IFS
+# delimiters (tab included) regardless of what IFS is set to, silently
+# dropping empty fields and shifting everything after them left by one. Using
+# a non-whitespace, extremely-unlikely-to-appear-in-real-data separator
+# sidesteps that entirely. Shared by for_each_app and cmd_diff.
+app_rows() {
+  local config="$1"
+
+  # shellcheck disable=SC2016
+  yq -r '(.store // "gplay") as $d |
+    .apps[] |
+    [.name, .pkg, (.store // $d), (.repo // ""), (.asset // "\\.apk$"), (.path // "")] | join("§")' "$config"
+}
+
+# Calls app_fn (a zero-arg function; see install_app's comment) once per
+# configured app, with CURRENT_NAME/CURRENT_PKG/CURRENT_STORE/CURRENT_REPO/
+# CURRENT_ASSET/CURRENT_PATH set for it to read.
 for_each_app() {
   local config="$1"
   local app_fn="$2"
-  shift 2
-  local name pkg store repo asset failures=0
+  local failures=0
 
-  # shellcheck disable=SC2016
-  while IFS=$'\t' read -r name pkg store repo asset <&3
+  while IFS='§' read -r CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH <&3
   do
-    if ! "$app_fn" "$name" "$pkg" "$store" "$repo" "$asset" "$@"
+    if ! "$app_fn"
     then
-      log_error "$name ($pkg) failed"
+      log_error "$CURRENT_NAME ($CURRENT_PKG) failed"
       failures=$((failures + 1))
     fi
-  done 3< <(yq -r '(.store // "gplay") as $d |
-    .apps[] |
-    [.name, .pkg, (.store // $d), (.repo // ""), (.asset // "\\.apk$")] | @tsv' "$config")
+  done 3< <(app_rows "$config")
 
   if [[ $failures -gt 0 ]]
   then
@@ -591,8 +711,8 @@ for_each_app() {
 cmd_install() {
   local config="$DEFAULT_CONFIG"
   local cli_device=""
-  local dry_run=""
-  local force=""
+  local DRY_RUN=""
+  local FORCE_DOWNLOAD=""
   local bulk=""
 
   while [[ -n "${1:-}" ]]
@@ -611,11 +731,11 @@ cmd_install() {
         shift 2
         ;;
       --dry-run)
-        dry_run=1
+        DRY_RUN=1
         shift
         ;;
       -f|--force-download)
-        force=1
+        FORCE_DOWNLOAD=1
         shift
         ;;
       --bulk|--all-devices|--all)
@@ -667,11 +787,11 @@ cmd_install() {
     check_deps curl jq
   fi
 
-  local device overall_rc=0
-  for device in "${devices[@]}"
+  local DEVICE_SERIAL overall_rc=0
+  for DEVICE_SERIAL in "${devices[@]}"
   do
-    log_step "Target device: $device"
-    if ! for_each_app "$config" install_app "$device" "$dry_run" "$force"
+    log_step "Target device: $DEVICE_SERIAL"
+    if ! for_each_app "$config" install_app
     then
       overall_rc=1
     fi
@@ -683,7 +803,7 @@ cmd_install() {
 cmd_uninstall() {
   local config="$DEFAULT_CONFIG"
   local cli_device=""
-  local dry_run=""
+  local DRY_RUN=""
   local assume_yes=""
   local bulk=""
 
@@ -703,7 +823,7 @@ cmd_uninstall() {
         shift 2
         ;;
       --dry-run)
-        dry_run=1
+        DRY_RUN=1
         shift
         ;;
       -y|--yes|--noconfirm|--no-confirm)
@@ -739,7 +859,7 @@ cmd_uninstall() {
   local -a devices
   mapfile -t devices <<< "$devices_raw"
 
-  if [[ -z "$dry_run" && -z "$assume_yes" ]]
+  if [[ -z "$DRY_RUN" && -z "$assume_yes" ]]
   then
     local -a names
     mapfile -t names < <(yq -r '.apps[].name' "$config")
@@ -759,11 +879,11 @@ cmd_uninstall() {
     esac
   fi
 
-  local device overall_rc=0
-  for device in "${devices[@]}"
+  local DEVICE_SERIAL overall_rc=0
+  for DEVICE_SERIAL in "${devices[@]}"
   do
-    log_step "Target device: $device"
-    if ! for_each_app "$config" uninstall_app "$device" "$dry_run"
+    log_step "Target device: $DEVICE_SERIAL"
+    if ! for_each_app "$config" uninstall_app
     then
       overall_rc=1
     fi
@@ -843,6 +963,121 @@ cmd_clear_cache() {
   done
 }
 
+cmd_devices() {
+  while [[ -n "${1:-}" ]]
+  do
+    case "$1" in
+      -h|--help)
+        usage
+        return 0
+        ;;
+      *)
+        log_error "Unknown option: $1"
+        usage >&2
+        return 2
+        ;;
+    esac
+  done
+
+  check_deps adb
+
+  local -a lines
+  mapfile -t lines < <(list_device_lines)
+
+  if [[ ${#lines[@]} -eq 0 ]]
+  then
+    log_step "No adb devices connected"
+    return 0
+  fi
+
+  {
+    printf 'SERIAL\tMODEL\tCODENAME\tCONNECTION\n'
+    local line serial usb model codename connection
+    for line in "${lines[@]}"
+    do
+      serial="${line%% *}"
+      usb=""
+      model=""
+      codename=""
+      [[ "$line" =~ usb:([^[:space:]]+) ]] && usb="${BASH_REMATCH[1]}"
+      [[ "$line" =~ model:([^[:space:]]+) ]] && model="${BASH_REMATCH[1]}"
+      [[ "$line" =~ device:([^[:space:]]+) ]] && codename="${BASH_REMATCH[1]}"
+      connection="network"
+      [[ -n "$usb" ]] && connection="usb:$usb"
+      printf '%s\t%s\t%s\t%s\n' "$serial" "${model:-?}" "${codename:-?}" "$connection"
+    done
+  } | render_table
+}
+
+cmd_diff() {
+  local config="$DEFAULT_CONFIG"
+  local cli_device=""
+  local bulk=""
+
+  while [[ -n "${1:-}" ]]
+  do
+    case "$1" in
+      -h|--help)
+        usage
+        return 0
+        ;;
+      -c|--config)
+        config="$2"
+        shift 2
+        ;;
+      -d|--device)
+        cli_device="$2"
+        shift 2
+        ;;
+      --bulk|--all-devices|--all)
+        bulk=1
+        shift
+        ;;
+      *)
+        log_error "Unknown option: $1"
+        usage >&2
+        return 2
+        ;;
+    esac
+  done
+
+  check_deps adb yq
+
+  if [[ ! -f "$config" ]]
+  then
+    log_error "Config file not found: $config"
+    return 2
+  fi
+
+  local devices_raw
+  if ! devices_raw="$(resolve_devices "$cli_device" "$config" "$bulk")"
+  then
+    return 2
+  fi
+
+  local -a devices
+  mapfile -t devices <<< "$devices_raw"
+
+  local DEVICE_SERIAL CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH
+  for DEVICE_SERIAL in "${devices[@]}"
+  do
+    log_step "Target device: $DEVICE_SERIAL"
+
+    {
+      printf 'NAME\tPKG\tSTORE\tSTATUS\n'
+      while IFS='§' read -r CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH <&3
+      do
+        if is_installed "$DEVICE_SERIAL" "$CURRENT_PKG"
+        then
+          printf '%s\t%s\t%s\tinstalled\n' "$CURRENT_NAME" "$CURRENT_PKG" "$CURRENT_STORE"
+        else
+          printf '%s\t%s\t%s\tmissing\n' "$CURRENT_NAME" "$CURRENT_PKG" "$CURRENT_STORE"
+        fi
+      done 3< <(app_rows "$config")
+    } | render_table | colorize_word installed "$C_GREEN" | colorize_word missing "$C_YELLOW"
+  done
+}
+
 main() {
   if [[ -z "${1:-}" ]]
   then
@@ -866,6 +1101,12 @@ main() {
       ;;
     clear-cache)
       cmd_clear_cache "$@"
+      ;;
+    devices|list)
+      cmd_devices "$@"
+      ;;
+    diff)
+      cmd_diff "$@"
       ;;
     *)
       log_error "Unknown command: $command"

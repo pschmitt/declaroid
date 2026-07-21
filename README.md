@@ -4,13 +4,14 @@ Declarative Android app provisioning. Define the apps you want on a device in
 a YAML file, then `declaroid install` fetches and installs them, `declaroid
 uninstall` removes them, and already-installed apps are skipped automatically.
 
-Apps can come from three sources:
+Apps can come from four sources:
 
 - **Google Play**, via [gplaydl](https://github.com/rehmatworks/gplaydl)
   (anonymous authentication, no Google account needed)
 - **F-Droid**, via [fdroidcl](https://github.com/Hoverth/fdroidcl)
 - **GitHub releases**, downloaded directly from a repo's release assets
   (à la [Obtainium](https://github.com/ImranR98/Obtainium))
+- **Local APK files** already on disk
 
 ## Why
 
@@ -115,6 +116,8 @@ $ declaroid COMMAND [OPTIONS]
 |---|---|
 | `install` | Download (if not already cached) and install configured apps |
 | `uninstall` | Uninstall configured apps (no download) |
+| `diff` | Show which configured apps are installed vs missing, no changes made |
+| `devices`, `list` | List connected adb devices (serial, model, codename, connection) |
 | `clear-cache [PKG...]` | Remove cached APK downloads, all of them or just the given package(s) |
 
 ### Options
@@ -206,6 +209,22 @@ already-installed check and as the cache key) -- declaroid doesn't inspect
 the downloaded APK to figure this out for you, so get it from `aapt dump
 badging` or by installing once and checking `adb shell pm list packages`.
 
+#### `local`
+
+Installs an APK (or split APKs) already sitting on disk -- no download at
+all. Needs a `path` on the app entry:
+
+```yaml
+- name: Some App
+  pkg: com.example.app
+  store: local
+  path: /home/me/apks/some-app.apk        # a single file
+  # path: /home/me/apks/some-app-*.apk    # or a glob matching several splits
+  # path: /home/me/apks/some-app-splits/  # or a directory (every *.apk in it)
+```
+
+Like `gplay`, split APKs are deduped by checksum before `adb install-multiple`.
+
 ### Caching
 
 Downloads for `gplay` and `github` apps are cached under
@@ -217,13 +236,30 @@ Use `-f`/`--force-download` to bypass the cache for one run, or
 packages: `declaroid clear-cache com.example.app`).
 
 fdroid apps aren't cached by declaroid -- fdroidcl already caches its own
-downloads.
+downloads. local apps aren't cached either -- there's nothing to download.
+
+### Table output
+
+`declaroid devices` and `declaroid diff` render as a table: using
+[tsvtool](https://github.com/pschmitt/tsvtool) if it's on `$PATH`, falling
+back to `column -t` (with a bolded header) otherwise. `diff` additionally
+colors `installed` green and `missing` yellow regardless of which renderer
+was used.
 
 ### Uninstall confirmation
 
 `uninstall` lists the apps and device(s) it's about to touch and asks for
 confirmation, unless `--dry-run` or `-y`/`--yes`/`--noconfirm`/`--no-confirm`
 is given.
+
+## Shell completion
+
+A zsh completion function is at
+[`completions/_declaroid`](./completions/_declaroid) -- it completes
+commands, flags, and `-d`/`--device` from currently connected adb devices
+(serial + model/codename). The Nix package installs it to
+`share/zsh/site-functions/_declaroid` automatically; if `declaroid` is on
+your `$fpath` via that or your own `.zshrc`, completion just works.
 
 ## Development
 

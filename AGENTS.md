@@ -4,9 +4,10 @@
 
 `declaroid` is a single bash script (repo root, no extension) that installs
 and uninstalls Android apps on a device from a declarative YAML config, using
-`gplaydl` (Google Play), `fdroidcl` (F-Droid), or GitHub release assets as
-the source. Packaged via `flake.nix` + `pkgs/declaroid` (a `makeWrapper`
-derivation) and `pkgs/gplaydl` (not in nixpkgs, so vendored here).
+`gplaydl` (Google Play), `fdroidcl` (F-Droid), a GitHub repo's release
+assets, or a local APK file as the source. Packaged via `flake.nix` +
+`pkgs/declaroid` (a `makeWrapper` derivation) and `pkgs/gplaydl` (not in
+nixpkgs, so vendored here). Zsh completion lives at `completions/_declaroid`.
 
 ## Keep the README up to date
 
@@ -43,13 +44,52 @@ incomplete change, not a follow-up.
 - Test against a real adb device when touching install/uninstall/cache
   logic, not just `--dry-run` -- `--dry-run` does not exercise the actual
   download/cache/install code paths and has previously let bugs through.
+  Specifically: `--dry-run` never exposed either of the two bugs below --
+  both only showed up on a real `install`.
+- **Per-app data flows through `CURRENT_NAME`/`CURRENT_PKG`/`CURRENT_STORE`/
+  `CURRENT_REPO`/`CURRENT_ASSET`/`CURRENT_PATH`, not positional arguments.**
+  `for_each_app` sets these (via a plain, non-`local` `read`, so they're
+  visible to whatever it calls) before invoking `app_fn`; `install_app`,
+  `uninstall_app`, and the per-store `install_*` functions are all
+  effectively zero-arg and just read these plus `DEVICE_SERIAL`/`DRY_RUN`/
+  `FORCE_DOWNLOAD` (set once per device/run by `cmd_install`/`cmd_uninstall`).
+  This replaced a positional chain that had grown to 8-9 params and was
+  getting worse with every store added -- don't bring positional args back
+  for this data; add a new `CURRENT_*` variable instead. Values that are
+  genuinely computed/local (a resolved cache dir, a list of matched APK
+  files) should stay real function arguments, not `CURRENT_*` -- that
+  convention is specifically for per-app config data and run-wide context.
+- **The TSV-ish rows `app_rows` emits are joined with `§` (U+00A7), not a
+  real tab.** `repo`/`asset`/`path` are legitimately empty for most stores,
+  and bash's `read` collapses consecutive *whitespace* IFS delimiters --
+  tab included -- no matter what you set `IFS` to; there is no way to make
+  `IFS=$'\t' read` preserve an empty field between two tabs. This silently
+  shifted every field after the first empty one, which broke `github` and
+  `local` (both depend on fields that are empty for other stores) while
+  `gplay`/`fdroid` looked fine, since neither of them reads the
+  shifted-into-garbage fields. If you add a new per-app config field, put it
+  in `app_rows`'s `join("§")` list and read it out with `IFS='§' read`
+  (already done in `for_each_app` and `cmd_diff`) -- never `IFS=$'\t'`.
+- **Don't use `compgen`.** Nixpkgs' plain `bash` (what the packaged
+  `declaroid` actually runs under once wrapped) is built without
+  programmable-completion support, so `compgen` doesn't exist there even
+  though it works fine in an interactive dev shell. Use `has_apk_files()`
+  (array-glob + `[[ -e "${arr[0]}" ]]`) for "does this dir have any APKs",
+  and `find "$(dirname -- "$p")" -name "$(basename -- "$p")"` for "expand
+  this possibly-glob, possibly-literal path" -- see `install_local`. This
+  class of bug will not show up when testing against your own interactive
+  shell; it only shows up running the actual Nix-built binary.
 
 ## Nix packaging
 
 - `pkgs/declaroid/default.nix` wraps the script with `makeWrapper`, prefixing
   `PATH` with every runtime dependency (`android-tools`, `yq-go`, `gplaydl`,
-  `fdroidcl`, `curl`, `jq`, coreutils, etc). If the script starts shelling
-  out to something new, add it there.
+  `fdroidcl`, `curl`, `jq`, `util-linux` for `column`, coreutils, etc) and
+  installs `completions/_declaroid` to `share/zsh/site-functions/_declaroid`.
+  If the script starts shelling out to something new, add it to the
+  `makeBinPath` list too -- and remember the wrapped runtime is plain
+  nixpkgs `bash`, not your interactive shell's bash (see the `compgen` note
+  above).
 - `pkgs/gplaydl/default.nix` tracks upstream releases from
   https://github.com/rehmatworks/gplaydl (PyPI package `gplaydl`). Bump
   `version` and `hash` together; get the hash via

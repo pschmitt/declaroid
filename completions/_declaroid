@@ -1,0 +1,107 @@
+#compdef declaroid
+
+# Zsh completion for declaroid.
+# See https://github.com/pschmitt/declaroid
+
+_declaroid_devices() {
+  local -a lines devices
+  lines=(${(f)"$(adb devices -l 2>/dev/null)"})
+
+  local line serial model codename desc
+  for line in "${lines[@]}"
+  do
+    [[ "$line" == List\ of\ devices* ]] && continue
+    [[ "$line" == *$'\t'device* || "$line" == *" device "* || "$line" == *" device" ]] || continue
+
+    serial="${line%% *}"
+    model=""
+    codename=""
+    [[ "$line" =~ 'model:([^ ]+)' ]] && model="${match[1]}"
+    [[ "$line" =~ 'device:([^ ]+)' ]] && codename="${match[1]}"
+
+    desc="$serial"
+    if [[ -n "$model" || -n "$codename" ]]
+    then
+      desc+=" (${model:-?}/${codename:-?})"
+    fi
+
+    devices+=("${serial}:${desc}")
+  done
+
+  _describe 'connected device' devices
+}
+
+_declaroid_cached_packages() {
+  local cache_root="${XDG_CACHE_HOME:-$HOME/.cache}/declaroid"
+  local -a pkgs
+
+  [[ -d "$cache_root" ]] || return 0
+  pkgs=(${(f)"$(command find "$cache_root" -mindepth 1 -maxdepth 1 -type d -exec basename {} \;)"})
+  _describe 'cached package' pkgs
+}
+
+_declaroid_common_args() {
+  local -a args
+  args=(
+    '(-c --config)'{-c,--config}'[Path to the apps YAML config]:file:_files'
+    '(-d --device)'{-d,--device}'[Target device]:device:_declaroid_devices'
+    '(--bulk --all-devices --all)'{--bulk,--all-devices,--all}'[Target every matching device instead of erroring on ambiguity]'
+    '(-h --help)'{-h,--help}'[Show help]'
+  )
+  _arguments -s -S $args "$@"
+}
+
+_declaroid_commands() {
+  local -a commands
+  commands=(
+    'install:Download (if needed) and install configured apps'
+    'uninstall:Uninstall configured apps (no download)'
+    'diff:Show installed vs missing apps, no changes made'
+    'devices:List connected adb devices'
+    'list:Alias for devices'
+    'clear-cache:Remove cached APK downloads'
+  )
+  _describe -t commands 'declaroid command' commands
+}
+
+_declaroid() {
+  local curcontext="$curcontext" state line
+  typeset -A opt_args
+
+  _arguments -C \
+    '1: :_declaroid_commands' \
+    '*::arg:->args' \
+    && return 0
+
+  case "$state" in
+    args)
+      case "${line[1]}" in
+        install)
+          _declaroid_common_args \
+            '--dry-run[Print what would happen without downloading/installing]' \
+            '(-f --force-download)'{-f,--force-download}'[Re-download even if a cached copy exists]'
+          ;;
+        uninstall)
+          _declaroid_common_args \
+            '--dry-run[Print what would happen without uninstalling]' \
+            '(-y --yes --noconfirm --no-confirm)'{-y,--yes,--noconfirm,--no-confirm}'[Skip the confirmation prompt]'
+          ;;
+        diff)
+          _declaroid_common_args
+          ;;
+        devices|list)
+          _arguments \
+            '(-h --help)'{-h,--help}'[Show help]'
+          ;;
+        clear-cache)
+          _arguments \
+            '(-y --yes --noconfirm --no-confirm)'{-y,--yes,--noconfirm,--no-confirm}'[Skip the confirmation prompt]' \
+            '(-h --help)'{-h,--help}'[Show help]' \
+            '*:package:_declaroid_cached_packages'
+          ;;
+      esac
+      ;;
+  esac
+}
+
+_declaroid "$@"
