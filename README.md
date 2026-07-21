@@ -138,6 +138,7 @@ $ declaroid COMMAND [OPTIONS]
 | `--system` | generate-config | Include system apps too (default: third-party only) |
 | `--no-labels, --fast` | generate-config | Skip app name resolution, use the package id instead |
 | `-j, --jobs N` | generate-config | Resolve up to N app names in parallel (default: 6) |
+| `--sort-by KEY` | diff, devices | Sort output case-insensitively. diff: `name` (default) or `pkg`. devices: `serial` (default), `model`, `codename`, or `connection` |
 | `--bulk, --all-devices, --all` | all | Target every matching device instead of erroring out on ambiguity |
 | `-h, --help` | all | Show help |
 
@@ -178,10 +179,22 @@ Rename whatever comes out wrong or unhelpful.
 | anything containing `obtainium` | `github`, but Obtainium doesn't expose which repo it used |
 | anything else (`com.google.android.packageinstaller`, `null`, a browser, ...) | unknown -- there's no way to tell `local`/`fdroid`/`github` apart from this alone |
 
+Since `gplay` is overwhelmingly the common case, the generated config sets
+it as the top-level default (`store: gplay`) and only gives an app its own
+`store:` line when it differs from that.
+
 Reinstalling from this config as-is would fail for the last two cases (no
 `repo` to fetch, or no `store` at all), so those entries are written out
 **commented out**, with a `# TODO: ...` line explaining why right above
 them -- fill in the missing piece and uncomment to include them.
+
+Each app also gets a `profile:` (see [Android user/profile targeting](#android-userprofile-targeting))
+if it's installed anywhere other than just the device's current profile:
+`generate-config` enumerates every profile (`pm list users`) and checks
+each app against all of them, so a secondary profile doesn't need to be
+"the" other one -- if a device somehow has three or more, an app installed
+in more than one (but not literally all) still gets `profile: all`, since
+that's the closest value expressible via a single `--user` flag.
 
 A small denylist filters out GMS/AOSP system plumbing that routinely leaks
 into `pm list packages -3` ("third-party") because it's been updated via the

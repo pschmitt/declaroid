@@ -74,6 +74,9 @@ ${C_BOLD}Options:${C_RESET}
       ${C_YELLOW}--system${C_RESET}            (generate-config only) Include system apps too (default: third-party only)
       ${C_YELLOW}--no-labels, --fast${C_RESET} (generate-config only) Skip resolving app names via aapt2, use the package id instead (faster)
   ${C_YELLOW}-j, --jobs N${C_RESET}          (generate-config only) Resolve up to N app names in parallel (default: 6)
+      ${C_YELLOW}--sort-by KEY${C_RESET}       (diff, devices) Sort output, case-insensitively.
+                          diff: name (default) or pkg. devices: serial
+                          (default), model, codename, or connection.
       ${C_YELLOW}--bulk, --all-devices, --all${C_RESET}
                           Target every device that matches (see below), instead
                           of erroring out on an ambiguous match
@@ -1075,12 +1078,18 @@ cmd_clear_cache() {
 }
 
 cmd_devices() {
+  local sort_by="serial"
+
   while [[ -n "${1:-}" ]]
   do
     case "$1" in
       -h|--help)
         usage
         return 0
+        ;;
+      --sort-by)
+        sort_by="$2"
+        shift 2
         ;;
       *)
         log_error "Unknown option: $1"
@@ -1089,6 +1098,18 @@ cmd_devices() {
         ;;
     esac
   done
+
+  local sort_field
+  case "$sort_by" in
+    serial) sort_field=1 ;;
+    model) sort_field=2 ;;
+    codename) sort_field=3 ;;
+    connection) sort_field=4 ;;
+    *)
+      log_error "Invalid --sort-by value: $sort_by (expected serial, model, codename, or connection)"
+      return 2
+      ;;
+  esac
 
   check_deps adb
 
@@ -1103,20 +1124,22 @@ cmd_devices() {
 
   {
     printf 'SERIAL\tMODEL\tCODENAME\tCONNECTION\n'
-    local line serial usb model codename connection
-    for line in "${lines[@]}"
-    do
-      serial="${line%% *}"
-      usb=""
-      model=""
-      codename=""
-      [[ "$line" =~ usb:([^[:space:]]+) ]] && usb="${BASH_REMATCH[1]}"
-      [[ "$line" =~ model:([^[:space:]]+) ]] && model="${BASH_REMATCH[1]}"
-      [[ "$line" =~ device:([^[:space:]]+) ]] && codename="${BASH_REMATCH[1]}"
-      connection="network"
-      [[ -n "$usb" ]] && connection="usb:$usb"
-      printf '%s\t%s\t%s\t%s\n' "$serial" "${model:-?}" "${codename:-?}" "$connection"
-    done
+    {
+      local line serial usb model codename connection
+      for line in "${lines[@]}"
+      do
+        serial="${line%% *}"
+        usb=""
+        model=""
+        codename=""
+        [[ "$line" =~ usb:([^[:space:]]+) ]] && usb="${BASH_REMATCH[1]}"
+        [[ "$line" =~ model:([^[:space:]]+) ]] && model="${BASH_REMATCH[1]}"
+        [[ "$line" =~ device:([^[:space:]]+) ]] && codename="${BASH_REMATCH[1]}"
+        connection="network"
+        [[ -n "$usb" ]] && connection="usb:$usb"
+        printf '%s\t%s\t%s\t%s\n' "$serial" "${model:-?}" "${codename:-?}" "$connection"
+      done
+    } | sort -t $'\t' -k"${sort_field},${sort_field}" -f
   } | render_table
 }
 
@@ -1124,6 +1147,7 @@ cmd_diff() {
   local config="$DEFAULT_CONFIG"
   local cli_device=""
   local bulk=""
+  local sort_by="name"
 
   while [[ -n "${1:-}" ]]
   do
@@ -1144,6 +1168,10 @@ cmd_diff() {
         bulk=1
         shift
         ;;
+      --sort-by)
+        sort_by="$2"
+        shift 2
+        ;;
       *)
         log_error "Unknown option: $1"
         usage >&2
@@ -1151,6 +1179,16 @@ cmd_diff() {
         ;;
     esac
   done
+
+  local sort_field
+  case "$sort_by" in
+    name) sort_field=1 ;;
+    pkg) sort_field=2 ;;
+    *)
+      log_error "Invalid --sort-by value: $sort_by (expected name or pkg)"
+      return 2
+      ;;
+  esac
 
   check_deps adb yq
 
@@ -1176,15 +1214,17 @@ cmd_diff() {
 
     {
       printf 'NAME\tPKG\tSTORE\tSTATUS\n'
-      while IFS='§' read -r CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE <&3
-      do
-        if is_installed "$DEVICE_SERIAL" "$CURRENT_PKG"
-        then
-          printf '%s\t%s\t%s\tinstalled\n' "$CURRENT_NAME" "$CURRENT_PKG" "$CURRENT_STORE"
-        else
-          printf '%s\t%s\t%s\tmissing\n' "$CURRENT_NAME" "$CURRENT_PKG" "$CURRENT_STORE"
-        fi
-      done 3< <(app_rows "$config")
+      {
+        while IFS='§' read -r CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE <&3
+        do
+          if is_installed "$DEVICE_SERIAL" "$CURRENT_PKG"
+          then
+            printf '%s\t%s\t%s\tinstalled\n' "$CURRENT_NAME" "$CURRENT_PKG" "$CURRENT_STORE"
+          else
+            printf '%s\t%s\t%s\tmissing\n' "$CURRENT_NAME" "$CURRENT_PKG" "$CURRENT_STORE"
+          fi
+        done 3< <(app_rows "$config")
+      } | sort -t $'\t' -k"${sort_field},${sort_field}" -f
     } | render_table | colorize_word installed "$C_GREEN" | colorize_word missing "$C_YELLOW"
   done
 }
@@ -1399,31 +1439,56 @@ cmd_generate_config() {
   local -a scope_flags=(-3)
   [[ -n "$include_system" ]] && scope_flags=()
 
-  local -a lines
-  mapfile -t lines < <(adb -s "$device" shell pm list packages "${scope_flags[@]}" -i </dev/null 2>/dev/null | tr -d '\r' | sort)
+  # Enumerate every Android user/profile on the device (the personal one,
+  # plus any Work Profile / Island / secondary full user -- there can be
+  # more than one of the latter) so each app's install scope can be checked
+  # against all of them, not just assumed. Falls back to just "0" if this
+  # can't be determined (no multi-user support, older Android).
+  local -a profile_ids=()
+  local -a user_lines
+  mapfile -t user_lines < <(adb -s "$device" shell pm list users </dev/null 2>/dev/null | tr -d '\r')
+  local uline
+  for uline in "${user_lines[@]}"
+  do
+    [[ "$uline" =~ UserInfo\{([0-9]+): ]] && profile_ids+=("${BASH_REMATCH[1]}")
+  done
+  [[ ${#profile_ids[@]} -eq 0 ]] && profile_ids=(0)
 
-  if [[ ${#lines[@]} -eq 0 ]]
+  local current_profile
+  current_profile="$(resolve_target_user "$device")"
+
+  # Gather packages+installer per profile (one bulk `pm list packages` call
+  # per profile, not per app) so each app's profile field can be set from
+  # which profile(s) it actually turned up in, instead of just guessing.
+  local -A pkg_installer=()
+  local -A pkg_profiles=()
+  local pid line pkg installer
+  for pid in "${profile_ids[@]}"
+  do
+    local -a lines
+    mapfile -t lines < <(adb -s "$device" shell pm list packages "${scope_flags[@]}" -i --user "$pid" </dev/null 2>/dev/null | tr -d '\r')
+
+    for line in "${lines[@]}"
+    do
+      [[ "$line" =~ ^package:([^[:space:]]+)[[:space:]]+installer=(.*)$ ]] || continue
+      pkg="${BASH_REMATCH[1]}"
+      installer="${BASH_REMATCH[2]}"
+
+      is_system_plumbing_pkg "$pkg" && continue
+
+      [[ -z "${pkg_installer[$pkg]:-}" ]] && pkg_installer["$pkg"]="$installer"
+      pkg_profiles["$pkg"]+="$pid "
+    done
+  done
+
+  local -a keep_pkgs
+  mapfile -t keep_pkgs < <(printf '%s\n' "${!pkg_installer[@]}" | sort)
+
+  if [[ ${#keep_pkgs[@]} -eq 0 ]]
   then
     log_error "No packages found on $device"
     return 1
   fi
-
-  # Pre-filter to the packages we'll actually emit, so the parallel label
-  # pass below doesn't waste time/bandwidth on denylisted plumbing.
-  local -a keep_pkgs=()
-  local -A pkg_installer=()
-  local line pkg installer
-  for line in "${lines[@]}"
-  do
-    [[ "$line" =~ ^package:([^[:space:]]+)[[:space:]]+installer=(.*)$ ]] || continue
-    pkg="${BASH_REMATCH[1]}"
-    installer="${BASH_REMATCH[2]}"
-
-    is_system_plumbing_pkg "$pkg" && continue
-
-    keep_pkgs+=("$pkg")
-    pkg_installer["$pkg"]="$installer"
-  done
 
   # Resolving names one at a time (one adb pull + one aapt2 call per app,
   # each easily a few seconds) is the slow part of this command, and it's
@@ -1464,14 +1529,20 @@ cmd_generate_config() {
     fi
     printf '# store is detected from the installer attribution (pm list packages -i):\n'
     printf '#   com.android.vending -> gplay, org.fdroid.fdroid -> fdroid, Obtainium -> github.\n'
+    printf '# The top-level default below covers the common case (gplay); only apps that\n'
+    printf '# differ from it get their own store: line.\n'
+    printf '# profile is only set on apps that are not installed just for the current\n'
+    printf '# profile (%s): "all" if installed for every profile found (%s), or a specific\n' "${current_profile:-?}" "${profile_ids[*]}"
+    printf '# profile id if installed for exactly one other one.\n'
     printf '# Entries marked with a "# TODO" are commented out: reinstalling from this\n'
     printf '# config as-is would fail for them (store could not be determined, or a\n'
     printf '# github repo/asset could not be recovered) -- fix them up and uncomment.\n'
     printf 'device: %s\n' "$device"
+    printf 'store: gplay\n'
     printf 'apps:\n'
 
-    local store name resolved todo
-    local -a entry_lines
+    local store name resolved todo profile_field
+    local -a entry_lines app_profiles
     for pkg in "${keep_pkgs[@]}"
     do
       installer="${pkg_installer[$pkg]}"
@@ -1481,6 +1552,25 @@ cmd_generate_config() {
       if [[ -n "$resolve_names" ]] && resolved="$(resolve_app_label "$device" "$pkg")" && [[ -n "$resolved" ]]
       then
         name="$resolved"
+      fi
+
+      # shellcheck disable=SC2206
+      app_profiles=(${pkg_profiles[$pkg]})
+      profile_field=""
+      if [[ ${#app_profiles[@]} -ge ${#profile_ids[@]} ]]
+      then
+        profile_field="all"
+      elif [[ ${#app_profiles[@]} -gt 1 ]]
+      then
+        # In more than one profile but (per the check above) not literally
+        # every enumerated one -- "all" is the closest value expressible via
+        # a single --user flag; worst case a reinstall also lands in an
+        # extra profile that happened not to have it, which is an
+        # acceptable simplification for a "review before use" starting point.
+        profile_field="all"
+      elif [[ ${#app_profiles[@]} -eq 1 && "${app_profiles[0]}" != "$current_profile" ]]
+      then
+        profile_field="${app_profiles[0]}"
       fi
 
       todo=""
@@ -1493,10 +1583,14 @@ cmd_generate_config() {
         "")
           todo="store unknown (installer=${installer:-none}) -- set store by hand"
           ;;
+        gplay)
+          # matches the top-level default, no need to repeat it
+          ;;
         *)
           entry_lines+=("    store: $store")
           ;;
       esac
+      [[ -n "$profile_field" ]] && entry_lines+=("    profile: $profile_field")
 
       if [[ -n "$todo" ]]
       then

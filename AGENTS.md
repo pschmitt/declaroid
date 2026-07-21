@@ -145,6 +145,18 @@ incomplete change, not a follow-up.
   auto-detected current profile (see `effective_target_user`) -- but the
   *unset* case must keep resolving to the single auto-detected profile, not
   "all". Installing into every profile has to be an explicit per-app choice.
+- `generate-config`'s profile detection enumerates every profile up front
+  (`pm list users`) and does one bulk `pm list packages ... --user <id>`
+  call *per profile*, not one call per (app, profile) pair -- don't rewrite
+  this into a per-app loop that shells out to adb per profile per package,
+  it'll be needlessly slow for a device with many apps. If an app turns up
+  in more than one enumerated profile but not literally all of them, it
+  still gets `profile: all` (the closest value a single `--user` flag can
+  express) rather than trying to encode a specific subset.
+- `--sort-by` (`cmd_diff`, `cmd_devices`) pipes the *data rows only* through
+  `sort -t $'\t' -k<N>,<N> -f` -- the header row (`printf` outside that
+  inner pipe) must never enter the sort, or it'll end up sorted into the
+  data instead of staying first. `-f` gives case-insensitive comparison.
 
 ## Nix packaging
 
