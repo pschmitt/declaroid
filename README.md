@@ -121,6 +121,7 @@ $ declaroid COMMAND [OPTIONS]
 | `install` | Download (if not already cached) and install configured apps |
 | `uninstall` | Uninstall configured apps (no download) |
 | `diff` | Show which configured apps are installed vs missing, no changes made (`--full`: also list device apps not in the config) |
+| `search QUERY` | Search Google Play and/or F-Droid; no device or config needed |
 | `devices`, `list` | List connected adb devices (serial, model, codename, connection) |
 | `clear-cache [PKG...]` | Remove cached APK downloads, all of them or just the given package(s) |
 | `generate-config`, `dump` | Print a YAML config seeded from what's installed on a device |
@@ -140,6 +141,8 @@ $ declaroid COMMAND [OPTIONS]
 | `--no-labels, --fast` | generate-config | Skip app name resolution, use the package id instead |
 | `-j, --jobs N` | generate-config | Resolve up to N app names in parallel (default: 6) |
 | `--full` | diff | Also list device apps that aren't in the config, as `extra` |
+| `--store gplay\|fdroid\|all` | search | Which store(s) to search (default: `all`) |
+| `-l, --limit N` | search | Max results per store (default: 10) |
 | `--sort-by KEY` | diff, devices | Sort output case-insensitively. diff: `name` (default) or `pkg`. devices: `serial` (default), `model`, `codename`, or `connection` |
 | `--bulk, --all-devices, --all` | all | Target every matching device instead of erroring out on ambiguity |
 | `-h, --help` | all | Show help |
@@ -356,6 +359,33 @@ downloads. local apps aren't cached either -- there's nothing to download.
 
 `generate-config`'s resolved app names are cached the same way (as
 `<package-id>/.label`), regardless of store.
+
+### `search`: finding a package id
+
+Don't know an app's package id yet (needed for `pkg:` in the config)?
+`declaroid search QUERY` looks it up on Google Play and/or F-Droid -- no
+device or config required:
+
+```console
+$ declaroid search whatsapp --store gplay
+NAME                 PKG            STORE   URL
+WhatsApp Messenger    com.whatsapp   gplay   https://play.google.com/store/apps/details?id=com.whatsapp
+```
+
+Output is real TSV (tab-separated, header row included), so it's safe to
+pipe into `cut`/`awk`/etc. In an interactive terminal it's additionally
+colored and each app name is an [OSC 8 hyperlink](https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda)
+to the store listing (supported by kitty, wezterm, iTerm2, and VTE-based
+terminals like foot/gnome-terminal); piping or redirecting the output turns
+both off automatically (same as `NO_COLOR`), so scripted consumers never
+see escape codes mixed into the data.
+
+`--store` picks `gplay`, `fdroid`, or `all` (default). `-l`/`--limit` caps
+results *per store* (default 10), so `--store all -l 10` can return up to
+20 rows total. Google Play search comes from `gplaydl search`, which has no
+version info to offer; F-Droid search comes from `fdroidcl search`, which
+does a fuzzy full-text match against name/summary/description (a query like
+"whatsapp" can surface apps that just mention it, not just apps named it).
 
 ### Table output
 

@@ -186,6 +186,40 @@ incomplete change, not a follow-up.
   prompts once per device for the whole batch of extra packages, not once
   per package, mirroring `cmd_uninstall`'s existing confirmation pattern
   (skippable with the same `-y|--yes|--noconfirm|--no-confirm`).
+- **`-t 1` must never be tested inside a function that gets called from
+  `$(...)`** -- it reads the tty-ness of the *current* file descriptor 1,
+  and inside a command substitution that's always the pipe capturing the
+  output, never the real terminal, regardless of what fd 1 was in the
+  calling context. `hyperlink()` (used by `cmd_search`) originally did
+  `[[ -t 1 ]]` internally and silently never emitted a single OSC 8 link
+  even when run in a real terminal -- caught by testing through `script
+  -qec` (a real pty) instead of trusting that plain manual testing would
+  surface it. Fixed by computing `HYPERLINKS` once at the top level
+  alongside the `C_*` color vars (same reasoning as those: a plain variable
+  read inside a subshell reflects the value from when it was set, unlike a
+  live fd test) and having `hyperlink()` only ever branch on that variable.
+  If you add another OSC-code-emitting helper, gate it the same way -- not
+  with its own `-t 1` check.
+- `search_gplay` parses `gplaydl search`'s only output format: a Rich-
+  rendered 3-column table (no `--json`/plain mode exists). Rich sizes
+  columns to the terminal width it detects via `shutil.get_terminal_size`
+  (confirmed by testing `COLUMNS=40` vs `COLUMNS=1000` against the same
+  query), and a pipe/mapfile capture reports width 80 by default, which can
+  wrap a long title across multiple box-drawn lines and break the "one
+  data row = one output line" assumption -- `COLUMNS=1000` before the call
+  avoids this in all realistic cases. Data rows are recognized by starting
+  with the *light* vertical bar `│` (U+2502); the header row uses the
+  *heavy* `┃` instead, so filtering on the light one skips header/border/
+  title lines for free without needing to hardcode a line count to skip.
+- `search_fdroid` needs its own client-side result cap -- `fdroidcl search`
+  (checked `--help`) has no `--limit`/`-l` flag at all, unlike `gplaydl
+  search`. Each result is two lines (an unindented `pkgid  title - version
+  (versioncode)` line, then a 4-space-indented summary line, distinguished
+  by leading whitespace); a title can itself legitimately contain " - "
+  (e.g. an app literally titled "WhatsApp Web To Go - Mobile Client for
+  WhatsApp We - 1.7.5 (39)"), so the title/version split uses bash's
+  greedy `=~` backtracking (`^(.*) - (.+)$`) to find the *last* " - "
+  rather than naively splitting on the first one.
 
 ## Nix packaging
 

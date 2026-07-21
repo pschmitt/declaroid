@@ -57,6 +57,7 @@ _declaroid_commands() {
     'install:Download (if needed) and install configured apps'
     'uninstall:Uninstall configured apps (no download)'
     'diff:Show installed vs missing apps, no changes made'
+    'search:Search Google Play and/or F-Droid'
     'devices:List connected adb devices'
     'list:Alias for devices'
     'clear-cache:Remove cached APK downloads'
@@ -94,6 +95,12 @@ _declaroid() {
           _declaroid_common_args \
             '--sort-by[Sort output]:key:(name pkg)' \
             '--full[Also list device apps that are not in the config]'
+          ;;
+        search)
+          _arguments \
+            '--store[Store(s) to search]:store:(gplay fdroid all)' \
+            '(-l --limit)'{-l,--limit}'[Max results per store]:limit' \
+            '(-h --help)'{-h,--help}'[Show help]'
           ;;
         devices|list)
           _arguments \
