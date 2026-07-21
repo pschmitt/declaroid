@@ -8,8 +8,15 @@
 device: redfin
 
 # Optional top-level default store for apps that don't set their own.
-# One of: gplay (default), fdroid, github.
+# One of: gplay (default), fdroid, github, local.
 store: gplay
+
+# Optional top-level default Android user/profile to install for (install
+# only). A user id (e.g. 0), or the literal "all" or "current". Omit this
+# entirely unless the device actually has more than one profile (a Work
+# Profile, Island, a second full user account) -- declaroid otherwise
+# auto-detects the device's current profile, which is what you want.
+# profile: 0
 
 apps:
   - name: DB Navigator
@@ -29,3 +36,8 @@ apps:
     # Narrow down to exactly one release asset -- this repo publishes
     # per-ABI, per-flavor, debug/release builds all in one release.
     asset: 'phone-arm64-v8a-release\.apk$'
+
+  - name: Company Portal
+    pkg: com.microsoft.windowsintune.companyportal
+    # Only this one app needs to land in the Work Profile too.
+    profile: all

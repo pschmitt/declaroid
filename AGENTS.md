@@ -104,6 +104,38 @@ incomplete change, not a follow-up.
   is only ever used for the single-remaining-file-after-dedup case in
   `install_apk_files`, routed through plain `install` instead of
   `install-multiple`. See that function's comment before touching this.
+- **`wait -n` returns the exit status of whichever backgrounded job just
+  finished, and `set -e` treats that as a script failure.** `generate-config`
+  parallelizes label resolution with a `job & ... wait -n`-based semaphore
+  (see `cmd_generate_config`); since `resolve_app_label` failing for any
+  given app is normal (not every package has a base.apk that's readable/
+  present), the very first job to fail silently killed the whole command --
+  no error message, just a truncated/empty result, because `set -e` fired
+  inside a command substitution and nothing surfaced it. Plain `wait` (no
+  args, waiting for everything) is fine and always returns 0 regardless of
+  child exit codes; only `wait -n` needs the `|| true`. Confirmed both ways
+  with a two-line repro before and after the fix -- don't trust reasoning
+  about this from bash's docs alone, it's exactly the kind of interaction
+  that's easy to get backwards.
+- **`adb install`/`install-multiple` without `--user` is not reliably "the
+  current profile" on a device with a secondary Android user profile** (a
+  Work Profile, [Island](https://github.com/oasisfeng/island), a second full
+  user account). Confirmed on a real device (`pm list users` showed user 0
+  "personal" + user 10 an Island-managed profile): a single-APK `adb
+  install` with no `--user` landed the app in *both* profiles, while an
+  `adb install-multiple` with no `--user`, same device, same session,
+  landed it in *only* the secondary profile -- not even consistent with
+  itself between the two install commands. `resolve_target_user` (`adb
+  shell am get-current-user`) plus always passing `--user` explicitly (see
+  `effective_target_user`, and install_apk_files/install_github/
+  install_fdroid's calls) is what makes this deterministic. Don't drop the
+  explicit `--user` and rely on the adb/pm default again without re-testing
+  against a real multi-profile device -- the "obvious" fallback behavior
+  demonstrably isn't there.
+- `profile: all` (or a specific id) in the config takes priority over the
+  auto-detected current profile (see `effective_target_user`) -- but the
+  *unset* case must keep resolving to the single auto-detected profile, not
+  "all". Installing into every profile has to be an explicit per-app choice.
 
 ## Nix packaging
 

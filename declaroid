@@ -72,7 +72,8 @@ ${C_BOLD}Options:${C_RESET}
                           (uninstall/clear-cache) Skip the confirmation prompt
   ${C_YELLOW}-o, --output FILE${C_RESET}       (generate-config only) Write to FILE instead of stdout
       ${C_YELLOW}--system${C_RESET}            (generate-config only) Include system apps too (default: third-party only)
-      ${C_YELLOW}--no-labels${C_RESET}         (generate-config only) Skip resolving app names via aapt2, use the package id instead (faster)
+      ${C_YELLOW}--no-labels, --fast${C_RESET} (generate-config only) Skip resolving app names via aapt2, use the package id instead (faster)
+  ${C_YELLOW}-j, --jobs N${C_RESET}          (generate-config only) Resolve up to N app names in parallel (default: 6)
       ${C_YELLOW}--bulk, --all-devices, --all${C_RESET}
                           Target every device that matches (see below), instead
                           of erroring out on an ambiguous match
@@ -94,6 +95,7 @@ devices (or, with --bulk, every connected device is used).
 ${C_BOLD}Config schema:${C_RESET}
   device: <adb serial or substring query>   # optional, see device resolution above
   store: gplay|fdroid|github|local           # optional top-level default, defaults to gplay
+  profile: <user id>|all|current              # optional top-level default (install only)
   apps:
     - name: <display name>
       pkg: <package id>
@@ -106,6 +108,11 @@ ${C_BOLD}Config schema:${C_RESET}
       path: <file, glob, or dir>    # required when store is local; a single apk
                                      # file, a glob matching one or more splits, or
                                      # a directory (every *.apk directly inside it).
+      profile: <user id>|all|current  # optional, overrides the top-level default;
+                                     # which Android user/profile to install for
+                                     # (e.g. a Work Profile). Unset means: use
+                                     # whatever the device reports as its current
+                                     # profile -- never defaults to "all".
 
 github releases are queried via the GitHub API; set \$GITHUB_TOKEN to raise
 the unauthenticated rate limit or access private repos. If a repo has no
@@ -359,6 +366,40 @@ is_installed() {
     | grep -qx "package:$pkg"
 }
 
+# Best-effort: prints the device's current user id (`am get-current-user`,
+# e.g. "0" for the primary/personal profile) or nothing if it can't be
+# determined (older Android without multi-user support, a transient adb
+# hiccup, ...). Callers should treat empty as "don't pass --user at all"
+# rather than an error -- see install_apk_files's comment for why this
+# matters on devices with a secondary/managed profile.
+resolve_target_user() {
+  local device="$1"
+  local user
+
+  user="$(adb -s "$device" shell am get-current-user </dev/null 2>/dev/null | tr -d '\r\n')"
+
+  if [[ "$user" =~ ^[0-9]+$ ]]
+  then
+    printf '%s\n' "$user"
+  fi
+}
+
+# The --user value to actually pass to adb install/install-multiple: the
+# per-app CURRENT_PROFILE from config wins if set (a number, "all", or
+# "current" -- all valid adb/pm values, passed through as-is, unvalidated),
+# otherwise the auto-detected current profile (TARGET_USER, set once per
+# device in cmd_install). Never defaults to "all" on its own -- installing
+# to every profile has to be an explicit, per-app opt-in via `profile: all`
+# in the config, not something that happens by not configuring anything.
+effective_target_user() {
+  if [[ -n "${CURRENT_PROFILE:-}" ]]
+  then
+    printf '%s\n' "$CURRENT_PROFILE"
+  else
+    printf '%s\n' "${TARGET_USER:-}"
+  fi
+}
+
 cache_dir_for() {
   local pkg="$1"
 
@@ -418,6 +459,14 @@ fetch_app() {
 # `install-multiple` with no installer attribution at all (matching prior
 # behavior). Don't add -i to the install-multiple branch without re-testing
 # against a real device first.
+#
+# --user "$TARGET_USER" is passed to both branches when set (see
+# resolve_target_user): on a device with a secondary/managed profile (a
+# Work Profile, Island, etc), `adb install`/`install-multiple` without
+# --user were observed installing into an unpredictable profile -- not
+# consistently "all profiles", not consistently the current one, and not
+# even consistent between `install` and `install-multiple` on the same
+# device. Passing --user explicitly makes this deterministic.
 install_apk_files() {
   local installer="$1"
   shift
@@ -448,11 +497,16 @@ install_apk_files() {
     return 1
   fi
 
+  local -a user_args=()
+  local user_val
+  user_val="$(effective_target_user)"
+  [[ -n "$user_val" ]] && user_args=(--user "$user_val")
+
   if [[ ${#keep_files[@]} -eq 1 && -n "$installer" ]]
   then
-    adb -s "$DEVICE_SERIAL" install -r -i "$installer" "${keep_files[0]}"
+    adb -s "$DEVICE_SERIAL" install -r "${user_args[@]}" -i "$installer" "${keep_files[0]}"
   else
-    adb -s "$DEVICE_SERIAL" install-multiple -r "${keep_files[@]}"
+    adb -s "$DEVICE_SERIAL" install-multiple -r "${user_args[@]}" "${keep_files[@]}"
   fi
 }
 
@@ -496,9 +550,15 @@ install_gplay() {
 
 # fdroidcl does its own `adb install` internally with no installer flag, so
 # fdroid-sourced apps always end up with installer=null -- nothing declaroid
-# can do about that without patching fdroidcl itself.
+# can do about that without patching fdroidcl itself. It does have its own
+# -user flag though (defaulting to the current user itself if omitted), so
+# profile targeting still works.
 install_fdroid() {
-  ANDROID_SERIAL="$DEVICE_SERIAL" fdroidcl install "$CURRENT_PKG"
+  local -a user_args=()
+  local user_val
+  user_val="$(effective_target_user)"
+  [[ -n "$user_val" ]] && user_args=(-user "$user_val")
+  ANDROID_SERIAL="$DEVICE_SERIAL" fdroidcl install "${user_args[@]}" "$CURRENT_PKG"
 }
 
 install_local() {
@@ -630,15 +690,20 @@ install_github() {
   # claimed installer is a real, currently-installed package (tested --
   # a synthetic "declaroid.store.github" id is just ignored, ending up
   # installer=null same as if we hadn't passed -i at all).
-  adb -s "$DEVICE_SERIAL" install -r "${apks[0]}"
+  local -a user_args=()
+  local user_val
+  user_val="$(effective_target_user)"
+  [[ -n "$user_val" ]] && user_args=(--user "$user_val")
+  adb -s "$DEVICE_SERIAL" install -r "${user_args[@]}" "${apks[0]}"
 }
 
 # Reads its per-app inputs from CURRENT_NAME/CURRENT_PKG/CURRENT_STORE/
-# CURRENT_REPO/CURRENT_ASSET/CURRENT_PATH (set by for_each_app's read loop)
-# and its run-wide context from DEVICE_SERIAL/DRY_RUN/FORCE_DOWNLOAD (set by
-# cmd_install before calling for_each_app). See AGENTS.md for why -- this
-# replaced a positional-argument chain that kept growing every time a store
-# needed one more piece of config.
+# CURRENT_REPO/CURRENT_ASSET/CURRENT_PATH/CURRENT_PROFILE (set by
+# for_each_app's read loop) and its run-wide context from
+# DEVICE_SERIAL/DRY_RUN/FORCE_DOWNLOAD/TARGET_USER (set by cmd_install
+# before calling for_each_app). See AGENTS.md for why -- this replaced a
+# positional-argument chain that kept growing every time a store needed one
+# more piece of config.
 install_app() {
   local rc=0
 
@@ -709,31 +774,33 @@ uninstall_app() {
 }
 
 # Emits the configured apps as one row per app: name, pkg, store (defaulted),
-# repo, asset (defaulted), path -- joined with U+00A7 (SECTION SIGN), not a
-# tab. Several of these fields (repo/asset/path) are legitimately empty for
-# most stores, and bash's `read` collapses consecutive *whitespace* IFS
-# delimiters (tab included) regardless of what IFS is set to, silently
-# dropping empty fields and shifting everything after them left by one. Using
-# a non-whitespace, extremely-unlikely-to-appear-in-real-data separator
-# sidesteps that entirely. Shared by for_each_app and cmd_diff.
+# repo, asset (defaulted), path, profile (defaulted) -- joined with U+00A7
+# (SECTION SIGN), not a tab. Several of these fields (repo/asset/path/
+# profile) are legitimately empty for most apps, and bash's `read` collapses
+# consecutive *whitespace* IFS delimiters (tab included) regardless of what
+# IFS is set to, silently dropping empty fields and shifting everything
+# after them left by one. Using a non-whitespace, extremely-unlikely-to-
+# appear-in-real-data separator sidesteps that entirely. Shared by
+# for_each_app and cmd_diff.
 app_rows() {
   local config="$1"
 
   # shellcheck disable=SC2016
-  yq -r '(.store // "gplay") as $d |
+  yq -r '(.store // "gplay") as $ds |
+    (.profile // "") as $dp |
     .apps[] |
-    [.name, .pkg, (.store // $d), (.repo // ""), (.asset // "\\.apk$"), (.path // "")] | join("§")' "$config"
+    [.name, .pkg, (.store // $ds), (.repo // ""), (.asset // "\\.apk$"), (.path // ""), (.profile // $dp)] | join("§")' "$config"
 }
 
 # Calls app_fn (a zero-arg function; see install_app's comment) once per
 # configured app, with CURRENT_NAME/CURRENT_PKG/CURRENT_STORE/CURRENT_REPO/
-# CURRENT_ASSET/CURRENT_PATH set for it to read.
+# CURRENT_ASSET/CURRENT_PATH/CURRENT_PROFILE set for it to read.
 for_each_app() {
   local config="$1"
   local app_fn="$2"
   local failures=0
 
-  while IFS='§' read -r CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH <&3
+  while IFS='§' read -r CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE <&3
   do
     if ! "$app_fn"
     then
@@ -830,10 +897,11 @@ cmd_install() {
     check_deps curl jq
   fi
 
-  local DEVICE_SERIAL overall_rc=0
+  local DEVICE_SERIAL TARGET_USER overall_rc=0
   for DEVICE_SERIAL in "${devices[@]}"
   do
     log_step "Target device: $DEVICE_SERIAL"
+    TARGET_USER="$(resolve_target_user "$DEVICE_SERIAL")"
     if ! for_each_app "$config" install_app
     then
       overall_rc=1
@@ -1101,14 +1169,14 @@ cmd_diff() {
   local -a devices
   mapfile -t devices <<< "$devices_raw"
 
-  local DEVICE_SERIAL CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH
+  local DEVICE_SERIAL CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE
   for DEVICE_SERIAL in "${devices[@]}"
   do
     log_step "Target device: $DEVICE_SERIAL"
 
     {
       printf 'NAME\tPKG\tSTORE\tSTATUS\n'
-      while IFS='§' read -r CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH <&3
+      while IFS='§' read -r CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE <&3
       do
         if is_installed "$DEVICE_SERIAL" "$CURRENT_PKG"
         then
@@ -1214,14 +1282,30 @@ yaml_quote_scalar() {
   printf '"%s"\n' "$s"
 }
 
+# Cached alongside per-package APK downloads under $CACHE_ROOT/<pkg>/ --
+# `declaroid clear-cache [pkg]` already wipes that whole directory, so label
+# caching gets cache invalidation for free without any extra bookkeeping.
+label_cache_file_for() {
+  printf '%s/.label\n' "$(cache_dir_for "$1")"
+}
+
 # Pulls a package's base.apk and reads its default (unlocalized)
 # application-label via aapt2. Slow (transfers the whole APK -- can be
 # 100+ MB) and best-effort: prints nothing and returns non-zero on any
 # failure, so callers should fall back to the package id as the name.
+# Checks/populates the label cache; see label_cache_file_for.
 resolve_app_label() {
   local device="$1"
   local pkg="$2"
-  local apk_path tmp_apk label
+  local apk_path tmp_apk label cache_file
+
+  cache_file="$(label_cache_file_for "$pkg")"
+
+  if [[ -s "$cache_file" ]]
+  then
+    cat "$cache_file"
+    return 0
+  fi
 
   apk_path="$(adb -s "$device" shell pm path "$pkg" </dev/null 2>/dev/null | head -1 | tr -d '\r')"
   apk_path="${apk_path#package:}"
@@ -1244,7 +1328,10 @@ resolve_app_label() {
 
   if [[ "$label" =~ ^application-label:\'(.*)\'$ ]]
   then
-    printf '%s\n' "${BASH_REMATCH[1]}"
+    label="${BASH_REMATCH[1]}"
+    mkdir -p "$(dirname "$cache_file")"
+    printf '%s\n' "$label" > "$cache_file"
+    printf '%s\n' "$label"
     return 0
   fi
 
@@ -1256,6 +1343,7 @@ cmd_generate_config() {
   local output=""
   local include_system=""
   local resolve_names=1
+  local jobs=6
 
   while [[ -n "${1:-}" ]]
   do
@@ -1276,9 +1364,13 @@ cmd_generate_config() {
         include_system=1
         shift
         ;;
-      --no-labels)
+      --no-labels|--fast)
         resolve_names=""
         shift
+        ;;
+      -j|--jobs)
+        jobs="$2"
+        shift 2
         ;;
       *)
         log_error "Unknown option: $1"
@@ -1298,7 +1390,7 @@ cmd_generate_config() {
 
   if [[ -n "$resolve_names" ]] && ! command -v aapt2 >/dev/null 2>&1
   then
-    log_warn "aapt2 not found, app names will default to the package id (install aapt2 or pass --no-labels to silence this)"
+    log_warn "aapt2 not found, app names will default to the package id (install aapt2 or pass --no-labels/--fast to silence this)"
     resolve_names=""
   fi
 
@@ -1314,6 +1406,50 @@ cmd_generate_config() {
   then
     log_error "No packages found on $device"
     return 1
+  fi
+
+  # Pre-filter to the packages we'll actually emit, so the parallel label
+  # pass below doesn't waste time/bandwidth on denylisted plumbing.
+  local -a keep_pkgs=()
+  local -A pkg_installer=()
+  local line pkg installer
+  for line in "${lines[@]}"
+  do
+    [[ "$line" =~ ^package:([^[:space:]]+)[[:space:]]+installer=(.*)$ ]] || continue
+    pkg="${BASH_REMATCH[1]}"
+    installer="${BASH_REMATCH[2]}"
+
+    is_system_plumbing_pkg "$pkg" && continue
+
+    keep_pkgs+=("$pkg")
+    pkg_installer["$pkg"]="$installer"
+  done
+
+  # Resolving names one at a time (one adb pull + one aapt2 call per app,
+  # each easily a few seconds) is the slow part of this command, and it's
+  # entirely I/O-bound, so it parallelizes well. This pass runs up to $jobs
+  # of them concurrently and throws its own output away -- the point is
+  # purely to populate resolve_app_label's on-disk cache (see
+  # label_cache_file_for) so the sequential pass below that actually builds
+  # the YAML gets fast cache hits instead of doing the work twice.
+  if [[ -n "$resolve_names" ]]
+  then
+    log_step "Resolving ${#keep_pkgs[@]} app name(s) (up to $jobs at a time)"
+    local running=0
+    for pkg in "${keep_pkgs[@]}"
+    do
+      resolve_app_label "$device" "$pkg" >/dev/null 2>&1 &
+      running=$((running + 1))
+      if [[ $running -ge $jobs ]]
+      then
+        # wait -n returns the exit status of whichever job just finished --
+        # resolve_app_label failing for a given app is normal/expected, not
+        # a script error, so this must not trip `set -e`.
+        wait -n || true
+        running=$((running - 1))
+      fi
+    done
+    wait
   fi
 
   local yaml
@@ -1334,26 +1470,16 @@ cmd_generate_config() {
     printf 'device: %s\n' "$device"
     printf 'apps:\n'
 
-    local line pkg installer store name
-    for line in "${lines[@]}"
+    local store name resolved
+    for pkg in "${keep_pkgs[@]}"
     do
-      [[ "$line" =~ ^package:([^[:space:]]+)[[:space:]]+installer=(.*)$ ]] || continue
-      pkg="${BASH_REMATCH[1]}"
-      installer="${BASH_REMATCH[2]}"
-
-      is_system_plumbing_pkg "$pkg" && continue
-
+      installer="${pkg_installer[$pkg]}"
       store="$(store_for_installer "$installer")"
 
       name="$pkg"
-      if [[ -n "$resolve_names" ]]
+      if [[ -n "$resolve_names" ]] && resolved="$(resolve_app_label "$device" "$pkg")" && [[ -n "$resolved" ]]
       then
-        log_step "Resolving app name for $pkg"
-        local resolved
-        if resolved="$(resolve_app_label "$device" "$pkg")" && [[ -n "$resolved" ]]
-        then
-          name="$resolved"
-        fi
+        name="$resolved"
       fi
 
       printf '  - name: %s\n' "$(yaml_quote_scalar "$name")"

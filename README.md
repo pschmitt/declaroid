@@ -136,6 +136,8 @@ $ declaroid COMMAND [OPTIONS]
 | `-y, --yes, --noconfirm, --no-confirm` | uninstall, clear-cache | Skip the confirmation prompt |
 | `-o, --output FILE` | generate-config | Write to FILE instead of stdout |
 | `--system` | generate-config | Include system apps too (default: third-party only) |
+| `--no-labels, --fast` | generate-config | Skip app name resolution, use the package id instead |
+| `-j, --jobs N` | generate-config | Resolve up to N app names in parallel (default: 6) |
 | `--bulk, --all-devices, --all` | all | Target every matching device instead of erroring out on ambiguity |
 | `-h, --help` | all | Show help |
 
@@ -153,9 +155,18 @@ App names are read from each APK's `application-label` via
 [`aapt2`](https://developer.android.com/tools/aapt2) (part of nixpkgs'
 `aapt` package -- the Nix-built `declaroid` has it out of the box). This
 means pulling every app's `base.apk` off the device, which is slow for large
-apps and adds up across a big app list; pass `--no-labels` to skip it and
-just use the package ID as the name instead (also the automatic fallback if
-`aapt2` isn't installed). Rename whatever comes out wrong or unhelpful.
+apps and adds up across a big app list, so:
+
+- resolution runs in parallel, up to `-j`/`--jobs` apps at a time (default 6)
+- results are cached under `${XDG_CACHE_HOME:-$HOME/.cache}/declaroid/<package-id>/`
+  (the same place APK downloads are cached), so re-running `generate-config`
+  later is instant for any app it already resolved a name for --
+  `declaroid clear-cache [pkg]` clears this too
+- pass `--no-labels`/`--fast` to skip resolution entirely and just use the
+  package ID as the name (also the automatic fallback if `aapt2` isn't
+  installed)
+
+Rename whatever comes out wrong or unhelpful.
 
 `store` is guessed from each app's installer attribution
 (`pm list packages -i`):
@@ -205,6 +216,37 @@ doesn't need to be an exact match.
   `--bulk` is given, in which case every connected device is targeted.
 - **No query and exactly one device connected** → that device is used, no
   prompt.
+
+### Android user/profile targeting
+
+If a device has more than one Android user profile -- a Work Profile, a
+profile created by something like [Island](https://github.com/oasisfeng/island),
+a second full user account -- `adb install`/`install-multiple` without an
+explicit `--user` were observed behaving inconsistently on a real device:
+not reliably "the current profile", not reliably "all profiles", and not
+even consistent with each other for the same app. So declaroid always
+resolves a target explicitly rather than relying on that default:
+
+1. The per-app `profile:` (or the top-level default) from the config, if set
+   -- a user id (e.g. `0`), or the literal `all` or `current` (passed
+   straight through to `adb`/`fdroidcl`'s own `--user`/`-user` flag,
+   unvalidated).
+2. Otherwise, the device's current profile as reported by
+   `adb shell am get-current-user` -- normally the personal/parent profile,
+   even when a secondary profile happens to be more "active" in some sense.
+3. If that can't be determined either (no multi-user support, a transient
+   adb hiccup), no `--user` is passed at all -- whatever the device's own
+   default install behavior is.
+
+**This never defaults to `all` on its own.** Installing into every profile
+is an explicit opt-in (`profile: all`), not something that happens because
+you didn't configure anything.
+
+fdroidcl has its own `-user` flag (and its own "current user" default when
+it's not given), so `store: fdroid` respects `profile:` too. `uninstall`
+doesn't pass `--user` at all -- it removes the app from wherever it's
+actually installed, on the theory that "uninstall X" should mean X is gone,
+not "gone from one specific profile, possibly still present in another."
 
 ### Stores
 
@@ -291,6 +333,9 @@ packages: `declaroid clear-cache com.example.app`).
 
 fdroid apps aren't cached by declaroid -- fdroidcl already caches its own
 downloads. local apps aren't cached either -- there's nothing to download.
+
+`generate-config`'s resolved app names are cached the same way (as
+`<package-id>/.label`), regardless of store.
 
 ### Table output
 
