@@ -123,7 +123,7 @@ $ declaroid COMMAND [OPTIONS]
 | `diff` | Show which configured apps are installed vs missing, no changes made |
 | `devices`, `list` | List connected adb devices (serial, model, codename, connection) |
 | `clear-cache [PKG...]` | Remove cached APK downloads, all of them or just the given package(s) |
-| `generate-config` | Print a YAML config seeded from what's installed on a device |
+| `generate-config`, `dump` | Print a YAML config seeded from what's installed on a device |
 
 ### Options
 

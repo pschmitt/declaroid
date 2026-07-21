@@ -60,6 +60,8 @@ _declaroid_commands() {
     'devices:List connected adb devices'
     'list:Alias for devices'
     'clear-cache:Remove cached APK downloads'
+    'generate-config:Print a YAML config seeded from what is installed on a device'
+    'dump:Alias for generate-config'
   )
   _describe -t commands 'declaroid command' commands
 }
@@ -87,10 +89,12 @@ _declaroid() {
             '(-y --yes --noconfirm --no-confirm)'{-y,--yes,--noconfirm,--no-confirm}'[Skip the confirmation prompt]'
           ;;
         diff)
-          _declaroid_common_args
+          _declaroid_common_args \
+            '--sort-by[Sort output]:key:(name pkg)'
           ;;
         devices|list)
           _arguments \
+            '--sort-by[Sort output]:key:(serial model codename connection)' \
             '(-h --help)'{-h,--help}'[Show help]'
           ;;
         clear-cache)
@@ -98,6 +102,16 @@ _declaroid() {
             '(-y --yes --noconfirm --no-confirm)'{-y,--yes,--noconfirm,--no-confirm}'[Skip the confirmation prompt]' \
             '(-h --help)'{-h,--help}'[Show help]' \
             '*:package:_declaroid_cached_packages'
+          ;;
+        generate-config|dump)
+          _arguments \
+            '(-c --config)'{-c,--config}'[Path to write/read the apps YAML config]:file:_files' \
+            '(-d --device)'{-d,--device}'[Target device]:device:_declaroid_devices' \
+            '(-o --output)'{-o,--output}'[Write to FILE instead of stdout]:file:_files' \
+            '--system[Include system apps too]' \
+            '(--no-labels --fast)'{--no-labels,--fast}'[Skip app name resolution]' \
+            '(-j --jobs)'{-j,--jobs}'[Resolve up to N app names in parallel]:jobs' \
+            '(-h --help)'{-h,--help}'[Show help]'
           ;;
       esac
       ;;

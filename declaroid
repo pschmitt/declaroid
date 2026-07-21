@@ -60,7 +60,7 @@ ${C_BOLD}Commands:${C_RESET}
               List connected adb devices (serial, model, codename, connection)
   ${C_CYAN}clear-cache${C_RESET} [PKG...]
               Remove cached APK downloads (all of them, or just PKG(s) given)
-  ${C_CYAN}generate-config${C_RESET}
+  ${C_CYAN}generate-config${C_RESET}, ${C_CYAN}dump${C_RESET}
               Print a YAML config seeded from what's installed on a device
 
 ${C_BOLD}Options:${C_RESET}
@@ -1645,7 +1645,7 @@ main() {
     diff)
       cmd_diff "$@"
       ;;
-    generate-config)
+    generate-config|dump)
       cmd_generate_config "$@"
       ;;
     *)
