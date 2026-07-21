@@ -368,17 +368,18 @@ device or config required:
 
 ```console
 $ declaroid search whatsapp --store gplay
-NAME                 PKG            STORE   URL
-WhatsApp Messenger    com.whatsapp   gplay   https://play.google.com/store/apps/details?id=com.whatsapp
+NAME                 PKG            STORE
+WhatsApp Messenger   com.whatsapp   gplay
 ```
 
 Output is real TSV (tab-separated, header row included), so it's safe to
 pipe into `cut`/`awk`/etc. In an interactive terminal it's additionally
-colored and each app name is an [OSC 8 hyperlink](https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda)
+colored, and the NAME column is an [OSC 8 hyperlink](https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda)
 to the store listing (supported by kitty, wezterm, iTerm2, and VTE-based
-terminals like foot/gnome-terminal); piping or redirecting the output turns
-both off automatically (same as `NO_COLOR`), so scripted consumers never
-see escape codes mixed into the data.
+terminals like foot/gnome-terminal) -- the app name is the clickable text,
+there's no separate URL column. Piping or redirecting the output turns both
+color and links off automatically (same as `NO_COLOR`), so scripted
+consumers never see escape codes mixed into the data.
 
 `--store` picks `gplay`, `fdroid`, or `all` (default). `-l`/`--limit` caps
 results *per store* (default 10), so `--store all -l 10` can return up to

@@ -1464,7 +1464,7 @@ cmd_search() {
   fi
 
   {
-    printf '%sNAME\tPKG\tSTORE\tURL%s\n' "$C_BOLD" "$C_RESET"
+    printf '%sNAME\tPKG\tSTORE%s\n' "$C_BOLD" "$C_RESET"
 
     local -a rows
     local row name pkg app_store
@@ -1476,9 +1476,9 @@ cmd_search() {
       for row in "${rows[@]}"
       do
         IFS=$'\t' read -r name pkg app_store _ <<< "$row"
-        printf '%s\t%s\t%s%s%s\t%s\n' \
+        printf '%s\t%s\t%s%s%s\n' \
           "$(hyperlink "$(gplay_app_url "$pkg")" "$name")" \
-          "$pkg" "$C_BLUE" "$app_store" "$C_RESET" "$(gplay_app_url "$pkg")"
+          "$pkg" "$C_BLUE" "$app_store" "$C_RESET"
       done
     fi
 
@@ -1489,9 +1489,9 @@ cmd_search() {
       for row in "${rows[@]}"
       do
         IFS=$'\t' read -r name pkg app_store _ <<< "$row"
-        printf '%s\t%s\t%s%s%s\t%s\n' \
+        printf '%s\t%s\t%s%s%s\n' \
           "$(hyperlink "$(fdroid_app_url "$pkg")" "$name")" \
-          "$pkg" "$C_GREEN" "$app_store" "$C_RESET" "$(fdroid_app_url "$pkg")"
+          "$pkg" "$C_GREEN" "$app_store" "$C_RESET"
       done
     fi
   }
