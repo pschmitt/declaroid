@@ -372,14 +372,18 @@ NAME                 PKG            STORE
 WhatsApp Messenger   com.whatsapp   gplay
 ```
 
-Output is real TSV (tab-separated, header row included), so it's safe to
-pipe into `cut`/`awk`/etc. In an interactive terminal it's additionally
-colored, and the NAME column is an [OSC 8 hyperlink](https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda)
+Both stores' results are merged into a single table, like `devices`/`diff`
+-- rendered with [tsvtool](https://github.com/pschmitt/tsvtool) if it's on
+`$PATH`, falling back to `column -t` otherwise (same as `devices`/`diff`).
+Redirecting/piping it (`declaroid search whatsapp | cut -f2`) still gets
+plain, scriptable TSV: color and the hyperlink below turn off automatically
+whenever stdout isn't a terminal (same as `NO_COLOR`).
+
+In an interactive terminal, STORE is colored and the NAME column is an
+[OSC 8 hyperlink](https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda)
 to the store listing (supported by kitty, wezterm, iTerm2, and VTE-based
 terminals like foot/gnome-terminal) -- the app name is the clickable text,
-there's no separate URL column. Piping or redirecting the output turns both
-color and links off automatically (same as `NO_COLOR`), so scripted
-consumers never see escape codes mixed into the data.
+there's no separate URL column.
 
 `--store` picks `gplay`, `fdroid`, or `all` (default). `-l`/`--limit` caps
 results *per store* (default 10), so `--store all -l 10` can return up to
@@ -395,11 +399,18 @@ Go regexp `(?i)` flag.
 
 ### Table output
 
-`declaroid devices` and `declaroid diff` render as a table: using
-[tsvtool](https://github.com/pschmitt/tsvtool) if it's on `$PATH`, falling
-back to `column -t` (with a bolded header) otherwise. `diff` additionally
-colors `installed` green, `missing` yellow, and (with `--full`) `extra` red,
-regardless of which renderer was used.
+`declaroid devices`, `declaroid diff`, and `declaroid search` all render as
+a table: using [tsvtool](https://github.com/pschmitt/tsvtool) if it's on
+`$PATH`, falling back to `column -t` (with a bolded header) otherwise.
+`diff` additionally colors `installed` green, `missing` yellow, and (with
+`--full`) `extra` red; `search` colors the STORE column. Both are colored
+*after* handing off to tsvtool/`column -t`, not before, so alignment is
+never thrown off by invisible color codes. `search` is the one exception
+that needs color/links embedded *before* rendering (each row's OSC 8
+hyperlink points at a different URL, so it can't be added as a fixed-word
+pass afterward) -- tsvtool strips escape sequences out of its input by
+default, so `render_table` always passes it `--keep-escape-sequences`
+(harmless for devices/diff, which have nothing pre-embedded to begin with).
 
 ### `diff --full`: what's installed but not configured
 

@@ -220,6 +220,27 @@ incomplete change, not a follow-up.
   WhatsApp We - 1.7.5 (39)"), so the title/version split uses bash's
   greedy `=~` backtracking (`^(.*) - (.+)$`) to find the *last* " - "
   rather than naively splitting on the first one.
+- **Every command that emits a table (`devices`, `diff`, `search`) must go
+  through `render_table`, and any per-cell coloring should happen *after*
+  it returns (via `colorize_word`), not before.** `colorize_word` only
+  touches already-aligned text and can't change a cell's width, so it's
+  safe with either renderer (tsvtool or the `column -t` fallback); pre-
+  embedding color codes would make the raw byte length of a cell diverge
+  from its visible width, which `column -t` can't account for (it doesn't
+  understand ANSI at all). `search`'s NAME column is the one necessary
+  exception -- each row's OSC 8 hyperlink points at a *different* URL, so
+  it can't be expressed as a single fixed-word `colorize_word` pass and has
+  to be embedded before rendering.
+- **tsvtool strips ANSI/OSC 8 escape sequences out of its input by
+  default** (checked its source: `extract_tsv_rows` calls `strip_ansi`
+  unless `--keep-escape-sequences`/`-k` is passed) -- `render_table` always
+  passes `--keep-escape-sequences` to it now, since `search`'s pre-embedded
+  OSC 8 hyperlinks were silently vanishing before this was added (visible
+  width was still computed correctly either way, since tsvtool's width
+  calculation independently strips-for-measurement regardless of this
+  flag; the flag only controls whether the codes survive into the
+  *output*). Harmless for devices/diff, which never pre-embed anything for
+  tsvtool to strip in the first place.
 
 ## Nix packaging
 

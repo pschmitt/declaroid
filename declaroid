@@ -233,7 +233,14 @@ render_table() {
 
   if command -v tsvtool >/dev/null 2>&1
   then
-    local -a args=(pretty)
+    # --keep-escape-sequences: tsvtool strips ANSI/OSC 8 escape codes out of
+    # its *input* by default (checked its source: `strip_ansi` runs unless
+    # this flag is passed), which silently ate `search`'s OSC 8 hyperlinks
+    # before they ever reached the terminal. Harmless to pass unconditionally
+    # here -- devices/diff have nothing pre-embedded for tsvtool to strip in
+    # the first place (they colorize via colorize_word *after* render_table
+    # returns, not before), so this only ever matters for search.
+    local -a args=(pretty --keep-escape-sequences)
     [[ -z "$C_RESET" ]] && args+=(--no-color)
     printf '%s\n' "$data" | tsvtool "${args[@]}"
     return 0
@@ -1471,38 +1478,57 @@ cmd_search() {
     check_deps fdroidcl
   fi
 
+  # Collect both stores' results into one flat list before rendering
+  # anything, so the two searches come out as a single merged table (like
+  # `devices`/`diff`) instead of two separate blocks. STORE is colorized
+  # *after* render_table, via colorize_word, the same way cmd_diff colors
+  # installed/missing/extra -- that keeps column alignment correct
+  # regardless of renderer (tsvtool or the column -t fallback), since
+  # colorize_word only touches already-aligned text and doesn't change any
+  # cell's width. NAME's OSC 8 hyperlink can't use that trick (each row
+  # links to a different URL, not a fixed word), so it's embedded before
+  # rendering; tsvtool measures visible width around OSC 8/ANSI codes
+  # (checked its source), so this aligns correctly there, but the column -t
+  # fallback doesn't understand OSC 8 and can misalign the NAME column
+  # slightly when hyperlinks are active and tsvtool isn't installed --
+  # accepted since tsvtool is always available in this project's own
+  # environment.
+  local -a all_rows=()
+  local -a rows
+  local row name pkg app_store
+
+  if [[ "$store" == gplay || "$store" == all ]]
+  then
+    log_step "Searching Google Play for \"$query\""
+    mapfile -t rows < <(search_gplay "$query" "$limit")
+    for row in "${rows[@]}"
+    do
+      IFS=$'\t' read -r name pkg app_store _ <<< "$row"
+      all_rows+=("$(hyperlink "$(gplay_app_url "$pkg")" "$name")"$'\t'"$pkg"$'\t'"$app_store")
+    done
+  fi
+
+  if [[ "$store" == fdroid || "$store" == all ]]
+  then
+    log_step "Searching F-Droid for \"$query\""
+    mapfile -t rows < <(search_fdroid "$query" "$limit")
+    for row in "${rows[@]}"
+    do
+      IFS=$'\t' read -r name pkg app_store _ <<< "$row"
+      all_rows+=("$(hyperlink "$(fdroid_app_url "$pkg")" "$name")"$'\t'"$pkg"$'\t'"$app_store")
+    done
+  fi
+
+  if [[ ${#all_rows[@]} -eq 0 ]]
+  then
+    log_step "No results found for \"$query\""
+    return 0
+  fi
+
   {
-    printf '%sNAME\tPKG\tSTORE%s\n' "$C_BOLD" "$C_RESET"
-
-    local -a rows
-    local row name pkg app_store
-
-    if [[ "$store" == gplay || "$store" == all ]]
-    then
-      log_step "Searching Google Play for \"$query\""
-      mapfile -t rows < <(search_gplay "$query" "$limit")
-      for row in "${rows[@]}"
-      do
-        IFS=$'\t' read -r name pkg app_store _ <<< "$row"
-        printf '%s\t%s\t%s%s%s\n' \
-          "$(hyperlink "$(gplay_app_url "$pkg")" "$name")" \
-          "$pkg" "$C_BLUE" "$app_store" "$C_RESET"
-      done
-    fi
-
-    if [[ "$store" == fdroid || "$store" == all ]]
-    then
-      log_step "Searching F-Droid for \"$query\""
-      mapfile -t rows < <(search_fdroid "$query" "$limit")
-      for row in "${rows[@]}"
-      do
-        IFS=$'\t' read -r name pkg app_store _ <<< "$row"
-        printf '%s\t%s\t%s%s%s\n' \
-          "$(hyperlink "$(fdroid_app_url "$pkg")" "$name")" \
-          "$pkg" "$C_GREEN" "$app_store" "$C_RESET"
-      done
-    fi
-  }
+    printf 'NAME\tPKG\tSTORE\n'
+    printf '%s\n' "${all_rows[@]}"
+  } | render_table | colorize_word gplay "$C_BLUE" | colorize_word fdroid "$C_GREEN"
 }
 
 cmd_devices() {
