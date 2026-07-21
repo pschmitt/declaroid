@@ -1,0 +1,883 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+DEFAULT_CONFIG="${DECLAROID_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/declaroid/apps.yaml}"
+CACHE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/declaroid"
+
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]
+then
+  C_RESET=$'\e[0m'
+  C_BOLD=$'\e[1m'
+  C_RED=$'\e[31m'
+  C_GREEN=$'\e[32m'
+  C_YELLOW=$'\e[33m'
+  C_BLUE=$'\e[34m'
+  C_CYAN=$'\e[36m'
+else
+  C_RESET=''
+  C_BOLD=''
+  C_RED=''
+  C_GREEN=''
+  C_YELLOW=''
+  C_BLUE=''
+  C_CYAN=''
+fi
+
+log_step() {
+  printf '%s==>%s %s\n' "${C_BOLD}${C_BLUE}" "$C_RESET" "$1" >&2
+}
+
+log_skip() {
+  printf '%s[skip]%s %s\n' "$C_YELLOW" "$C_RESET" "$1" >&2
+}
+
+log_ok() {
+  printf '%s[ok]%s %s\n' "$C_GREEN" "$C_RESET" "$1" >&2
+}
+
+log_warn() {
+  printf '%s[warn]%s %s\n' "$C_YELLOW" "$C_RESET" "$1" >&2
+}
+
+log_error() {
+  printf '%s[error]%s %s\n' "$C_RED" "$C_RESET" "$1" >&2
+}
+
+usage() {
+  cat <<EOF
+Usage: declaroid COMMAND [OPTIONS]
+
+Declarative Android app provisioning: define apps in YAML, install/uninstall
+them onto a device via adb, fetching from Google Play (gplaydl), F-Droid
+(fdroidcl), or GitHub release assets.
+
+Commands:
+  install     Download (if not already cached) and install configured apps
+  uninstall   Uninstall configured apps (no download)
+  clear-cache [PKG...]
+              Remove cached APK downloads (all of them, or just PKG(s) given)
+
+Options:
+  -c, --config FILE       Path to the apps YAML config (default: ${DEFAULT_CONFIG})
+  -d, --device QUERY      Target device (also settable via \$TARGET_DEVICE)
+      --dry-run           Print what would happen without downloading/installing/uninstalling
+  -f, --force-download    (install only) Re-download even if a cached copy exists
+  -y, --yes, --noconfirm, --no-confirm
+                          (uninstall/clear-cache) Skip the confirmation prompt
+      --bulk, --all-devices, --all
+                          Target every device that matches (see below), instead
+                          of erroring out on an ambiguous match
+  -h, --help              Show this help
+
+Config resolution order: --config, \$DECLAROID_CONFIG,
+${XDG_CONFIG_HOME:-\$HOME/.config}/declaroid/apps.yaml
+
+Device resolution order: --device, \$TARGET_DEVICE, .device in the config.
+The value is matched as a case-insensitive substring against each connected
+device's serial, USB path, product, model, and codename (e.g. "redfin",
+"clover", an IP, or part of a serial) -- so it doesn't need to be exact.
+If it matches more than one connected device, declaroid errors out unless
+--bulk/--all-devices/--all is given, in which case every match is used.
+If nothing resolves at all, you'll be prompted to pick from connected
+devices (or, with --bulk, every connected device is used).
+
+Config schema:
+  device: <adb serial or substring query>   # optional, see device resolution above
+  store: gplay|fdroid|github                # optional top-level default, defaults to gplay
+  apps:
+    - name: <display name>
+      pkg: <package id>
+      store: gplay|fdroid|github    # optional, overrides the top-level default
+      repo: <owner>/<repo>          # required when store is github
+      asset: <regex>                # (github only) selects the release asset;
+                                     # default: '\\.apk\$'. Must match exactly one
+                                     # asset -- narrow it for multi-arch/multi-flavor
+                                     # releases (e.g. debug vs release, per-ABI apks).
+
+github releases are queried via the GitHub API; set \$GITHUB_TOKEN to raise
+the unauthenticated rate limit or access private repos. If a repo has no
+non-prerelease release, the most recent release (including prereleases) is
+used instead.
+
+APKs downloaded from gplay/github are cached under ${CACHE_ROOT}/<package-id>/
+so repeated installs don't re-download (see --force-download). fdroid apps
+are cached by fdroidcl itself.
+EOF
+}
+
+check_deps() {
+  local bin
+
+  for bin in "$@"
+  do
+    if ! command -v "$bin" >/dev/null 2>&1
+    then
+      log_error "Missing required binary: $bin"
+      return 1
+    fi
+  done
+}
+
+config_stores() {
+  local config="$1"
+
+  # shellcheck disable=SC2016
+  yq -r '(.store // "gplay") as $d | [.apps[] | (.store // $d)] | unique | .[]' "$config"
+}
+
+list_device_lines() {
+  adb devices -l | awk 'NR>1 && $2=="device" {print}'
+}
+
+build_searchable() {
+  local line="$1"
+  local serial="${line%% *}"
+  local usb="" product="" model="" codename=""
+
+  [[ "$line" =~ usb:([^[:space:]]+) ]] && usb="${BASH_REMATCH[1]}"
+  [[ "$line" =~ product:([^[:space:]]+) ]] && product="${BASH_REMATCH[1]}"
+  [[ "$line" =~ model:([^[:space:]]+) ]] && model="${BASH_REMATCH[1]}"
+  [[ "$line" =~ device:([^[:space:]]+) ]] && codename="${BASH_REMATCH[1]}"
+
+  printf '%s %s %s %s %s\n' "$serial" "$usb" "$product" "$model" "$codename"
+}
+
+format_device_line() {
+  local line="$1"
+  local serial="${line%% *}"
+  local model="" codename=""
+
+  [[ "$line" =~ model:([^[:space:]]+) ]] && model="${BASH_REMATCH[1]}"
+  [[ "$line" =~ device:([^[:space:]]+) ]] && codename="${BASH_REMATCH[1]}"
+
+  if [[ -n "$model" || -n "$codename" ]]
+  then
+    printf '%s (%s/%s)\n' "$serial" "${model:-?}" "${codename:-?}"
+  else
+    printf '%s\n' "$serial"
+  fi
+}
+
+prompt_pick_device() {
+  local -a lines=("$@")
+
+  if [[ ! -t 0 ]]
+  then
+    log_error "Multiple devices connected and no --device/\$TARGET_DEVICE given; stdin is not a terminal to prompt"
+    return 1
+  fi
+
+  {
+    printf '%sMultiple devices connected, pick one:%s\n' "$C_BOLD" "$C_RESET"
+    local i
+    for i in "${!lines[@]}"
+    do
+      printf '  %s[%d]%s %s\n' "$C_CYAN" "$((i + 1))" "$C_RESET" "$(format_device_line "${lines[$i]}")"
+    done
+  } >&2
+
+  local choice
+  while true
+  do
+    read -rp "Device number: " choice
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#lines[@]} ))
+    then
+      printf '%s\n' "${lines[$((choice - 1))]%% *}"
+      return 0
+    fi
+    log_error "Invalid choice: $choice"
+  done
+}
+
+resolve_devices() {
+  local cli_device="$1"
+  local config="$2"
+  local bulk="$3"
+  local query=""
+
+  if [[ -n "$cli_device" ]]
+  then
+    query="$cli_device"
+  elif [[ -n "${TARGET_DEVICE:-}" ]]
+  then
+    query="$TARGET_DEVICE"
+  else
+    local from_yaml
+    from_yaml="$(yq -r '.device' "$config")"
+    if [[ -n "$from_yaml" && "$from_yaml" != "null" ]]
+    then
+      query="$from_yaml"
+    fi
+  fi
+
+  local -a lines
+  mapfile -t lines < <(list_device_lines)
+
+  if [[ ${#lines[@]} -eq 0 ]]
+  then
+    log_error "No adb devices connected"
+    return 1
+  fi
+
+  local -a matched=()
+
+  if [[ -n "$query" ]]
+  then
+    local line searchable
+    for line in "${lines[@]}"
+    do
+      searchable="$(build_searchable "$line")"
+      if [[ "${searchable,,}" == *"${query,,}"* ]]
+      then
+        matched+=("$line")
+      fi
+    done
+
+    if [[ ${#matched[@]} -eq 0 ]]
+    then
+      log_error "No connected device matches '$query'"
+      return 1
+    fi
+  else
+    matched=("${lines[@]}")
+  fi
+
+  if [[ ${#matched[@]} -eq 1 ]]
+  then
+    printf '%s\n' "${matched[0]%% *}"
+    return 0
+  fi
+
+  if [[ -n "$bulk" ]]
+  then
+    log_step "${#matched[@]} device(s) matched, targeting all of them (--bulk)"
+    local m
+    for m in "${matched[@]}"
+    do
+      printf '%s\n' "${m%% *}"
+    done
+    return 0
+  fi
+
+  if [[ -z "$query" ]]
+  then
+    prompt_pick_device "${matched[@]}"
+    return $?
+  fi
+
+  {
+    printf "%sMultiple devices match '%s':%s\\n" "$C_BOLD" "$query" "$C_RESET"
+    local m
+    for m in "${matched[@]}"
+    do
+      printf '  %s\n' "$(format_device_line "$m")"
+    done
+    printf 'Use --bulk/--all-devices/--all to target all of them, or refine the match.\n'
+  } >&2
+  return 1
+}
+
+is_installed() {
+  local device="$1"
+  local pkg="$2"
+
+  adb -s "$device" shell pm list packages "$pkg" </dev/null 2>/dev/null \
+    | tr -d '\r' \
+    | grep -qx "package:$pkg"
+}
+
+cache_dir_for() {
+  local pkg="$1"
+
+  printf '%s/%s\n' "$CACHE_ROOT" "$pkg"
+}
+
+fetch_app() {
+  local pkg="$1"
+  local force="$2"
+  local cache_dir
+  cache_dir="$(cache_dir_for "$pkg")"
+
+  if [[ -z "$force" ]] && compgen -G "$cache_dir/*.apk" >/dev/null 2>&1
+  then
+    log_step "Using cached download in $cache_dir"
+    printf '%s\n' "$cache_dir"
+    return 0
+  fi
+
+  mkdir -p "$cache_dir"
+
+  if ! gplaydl download "$pkg" -o "$cache_dir" >&2
+  then
+    log_error "Failed to download $pkg"
+    return 1
+  fi
+
+  printf '%s\n' "$cache_dir"
+}
+
+install_splits() {
+  local device="$1"
+  local dir="$2"
+  local -A seen_hashes
+  local -a keep_files
+  local -a obb_files
+  local f hash base
+
+  for f in "$dir"/*.apk
+  do
+    [[ -e "$f" ]] || continue
+    hash="$(sha256sum "$f" | cut -d' ' -f1)"
+    base="$(basename "$f")"
+
+    if [[ -n "${seen_hashes[$hash]:-}" ]]
+    then
+      log_warn "Skipping duplicate split $base (identical to ${seen_hashes[$hash]})"
+      continue
+    fi
+
+    seen_hashes[$hash]="$base"
+    keep_files+=("$f")
+  done
+
+  if [[ ${#keep_files[@]} -eq 0 ]]
+  then
+    log_error "No APK files found in $dir"
+    return 1
+  fi
+
+  adb -s "$device" install-multiple -r "${keep_files[@]}"
+
+  mapfile -t obb_files < <(find "$dir" -maxdepth 1 -iname '*.obb')
+  if [[ ${#obb_files[@]} -gt 0 ]]
+  then
+    log_warn "${#obb_files[@]} OBB/expansion file(s) are cached but not pushed automatically:"
+    printf '  %s\n' "${obb_files[@]}"
+  fi
+}
+
+install_gplay() {
+  local pkg="$1"
+  local device="$2"
+  local force="$3"
+  local cache_dir
+
+  if ! cache_dir="$(fetch_app "$pkg" "$force")"
+  then
+    return 1
+  fi
+
+  install_splits "$device" "$cache_dir"
+}
+
+install_fdroid() {
+  local pkg="$1"
+  local device="$2"
+
+  ANDROID_SERIAL="$device" fdroidcl install "$pkg"
+}
+
+fetch_github_release() {
+  local repo="$1"
+  local asset_pattern="$2"
+  local cache_dir="$3"
+  local -a curl_args=(--fail --silent --show-error --location)
+
+  if [[ -n "${GITHUB_TOKEN:-}" ]]
+  then
+    curl_args+=(--header "Authorization: Bearer ${GITHUB_TOKEN}")
+  fi
+
+  local release_json
+  if release_json="$(curl "${curl_args[@]}" "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null)"
+  then
+    log_step "Using latest release for $repo"
+  else
+    log_warn "No stable release found for $repo, falling back to most recent release (including prereleases)"
+    if ! release_json="$(curl "${curl_args[@]}" "https://api.github.com/repos/${repo}/releases" 2>/dev/null | jq -c '.[0]')"
+    then
+      log_error "Failed to query GitHub releases for $repo"
+      return 1
+    fi
+  fi
+
+  if [[ -z "$release_json" || "$release_json" == "null" ]]
+  then
+    log_error "No releases found for $repo"
+    return 1
+  fi
+
+  local -a matches
+  mapfile -t matches < <(jq -r --arg pat "$asset_pattern" \
+    '.assets[] | select(.name | test($pat)) | [.name, .browser_download_url] | @tsv' \
+    <<< "$release_json")
+
+  if [[ ${#matches[@]} -eq 0 ]]
+  then
+    log_error "No release asset matching '$asset_pattern' found for $repo"
+    return 1
+  fi
+
+  if [[ ${#matches[@]} -gt 1 ]]
+  then
+    log_error "Multiple release assets matched '$asset_pattern' for $repo, narrow the 'asset' pattern:"
+    local m
+    for m in "${matches[@]}"
+    do
+      printf '  %s\n' "${m%%$'\t'*}"
+    done
+    return 1
+  fi
+
+  local asset_name asset_url
+  IFS=$'\t' read -r asset_name asset_url <<< "${matches[0]}"
+
+  log_step "Downloading $asset_name"
+
+  if ! curl "${curl_args[@]}" --output "${cache_dir}/${asset_name}" "$asset_url"
+  then
+    log_error "Failed to download $asset_name"
+    return 1
+  fi
+}
+
+install_github() {
+  local pkg="$1"
+  local repo="$2"
+  local asset_pattern="$3"
+  local device="$4"
+  local force="$5"
+  local cache_dir
+  cache_dir="$(cache_dir_for "$pkg")"
+
+  if [[ -z "$repo" ]]
+  then
+    log_error "$pkg uses store: github but has no 'repo' set"
+    return 1
+  fi
+
+  if [[ -n "$force" ]] || ! compgen -G "$cache_dir/*.apk" >/dev/null 2>&1
+  then
+    mkdir -p "$cache_dir"
+    rm -f "$cache_dir"/*.apk
+    if ! fetch_github_release "$repo" "$asset_pattern" "$cache_dir"
+    then
+      return 1
+    fi
+  else
+    log_step "Using cached download in $cache_dir"
+  fi
+
+  local -a apks
+  mapfile -t apks < <(find "$cache_dir" -maxdepth 1 -iname '*.apk')
+
+  if [[ ${#apks[@]} -ne 1 ]]
+  then
+    log_error "Expected exactly one cached APK in $cache_dir, found ${#apks[@]}"
+    return 1
+  fi
+
+  adb -s "$device" install -r "${apks[0]}"
+}
+
+install_app() {
+  local name="$1"
+  local pkg="$2"
+  local store="$3"
+  local repo="$4"
+  local asset="$5"
+  local device="$6"
+  local dry_run="$7"
+  local force="$8"
+  local rc=0
+
+  if is_installed "$device" "$pkg"
+  then
+    log_skip "$name ($pkg) already installed"
+    return 0
+  fi
+
+  log_step "Installing $name ($pkg) [$store]"
+
+  if [[ -n "$dry_run" ]]
+  then
+    printf '  would install %s via %s\n' "$pkg" "$store"
+    return 0
+  fi
+
+  case "$store" in
+    gplay)
+      install_gplay "$pkg" "$device" "$force" || rc=$?
+      ;;
+    fdroid)
+      install_fdroid "$pkg" "$device" || rc=$?
+      ;;
+    github)
+      install_github "$pkg" "$repo" "$asset" "$device" "$force" || rc=$?
+      ;;
+    *)
+      log_error "Unknown store '$store' for $pkg (expected gplay, fdroid, or github)"
+      rc=1
+      ;;
+  esac
+
+  if [[ $rc -eq 0 ]]
+  then
+    log_ok "$name ($pkg) installed"
+  fi
+
+  return "$rc"
+}
+
+uninstall_app() {
+  local name="$1"
+  local pkg="$2"
+  local _store="$3"
+  local _repo="$4"
+  local _asset="$5"
+  local device="$6"
+  local dry_run="$7"
+
+  if ! is_installed "$device" "$pkg"
+  then
+    log_skip "$name ($pkg) not installed"
+    return 0
+  fi
+
+  log_step "Uninstalling $name ($pkg)"
+
+  if [[ -n "$dry_run" ]]
+  then
+    printf '  would uninstall %s\n' "$pkg"
+    return 0
+  fi
+
+  if adb -s "$device" uninstall "$pkg"
+  then
+    log_ok "$name ($pkg) uninstalled"
+  else
+    return 1
+  fi
+}
+
+for_each_app() {
+  local config="$1"
+  local app_fn="$2"
+  shift 2
+  local name pkg store repo asset failures=0
+
+  # shellcheck disable=SC2016
+  while IFS=$'\t' read -r name pkg store repo asset <&3
+  do
+    if ! "$app_fn" "$name" "$pkg" "$store" "$repo" "$asset" "$@"
+    then
+      log_error "$name ($pkg) failed"
+      failures=$((failures + 1))
+    fi
+  done 3< <(yq -r '(.store // "gplay") as $d |
+    .apps[] |
+    [.name, .pkg, (.store // $d), (.repo // ""), (.asset // "\\.apk$")] | @tsv' "$config")
+
+  if [[ $failures -gt 0 ]]
+  then
+    log_error "$failures app(s) failed"
+    return 1
+  fi
+
+  log_ok "All apps processed successfully"
+}
+
+cmd_install() {
+  local config="$DEFAULT_CONFIG"
+  local cli_device=""
+  local dry_run=""
+  local force=""
+  local bulk=""
+
+  while [[ -n "${1:-}" ]]
+  do
+    case "$1" in
+      -h|--help)
+        usage
+        return 0
+        ;;
+      -c|--config)
+        config="$2"
+        shift 2
+        ;;
+      -d|--device)
+        cli_device="$2"
+        shift 2
+        ;;
+      --dry-run)
+        dry_run=1
+        shift
+        ;;
+      -f|--force-download)
+        force=1
+        shift
+        ;;
+      --bulk|--all-devices|--all)
+        bulk=1
+        shift
+        ;;
+      *)
+        log_error "Unknown option: $1"
+        usage >&2
+        return 2
+        ;;
+    esac
+  done
+
+  check_deps adb yq sha256sum
+
+  if [[ ! -f "$config" ]]
+  then
+    log_error "Config file not found: $config"
+    return 2
+  fi
+
+  local devices_raw
+  if ! devices_raw="$(resolve_devices "$cli_device" "$config" "$bulk")"
+  then
+    return 2
+  fi
+
+  local -a devices
+  mapfile -t devices <<< "$devices_raw"
+
+  local -a stores
+  mapfile -t stores < <(config_stores "$config")
+
+  if printf '%s\n' "${stores[@]}" | grep -qx gplay
+  then
+    check_deps gplaydl
+  fi
+
+  if printf '%s\n' "${stores[@]}" | grep -qx fdroid
+  then
+    check_deps fdroidcl
+    log_step "Updating F-Droid index"
+    fdroidcl update
+  fi
+
+  if printf '%s\n' "${stores[@]}" | grep -qx github
+  then
+    check_deps curl jq
+  fi
+
+  local device overall_rc=0
+  for device in "${devices[@]}"
+  do
+    log_step "Target device: $device"
+    if ! for_each_app "$config" install_app "$device" "$dry_run" "$force"
+    then
+      overall_rc=1
+    fi
+  done
+
+  return "$overall_rc"
+}
+
+cmd_uninstall() {
+  local config="$DEFAULT_CONFIG"
+  local cli_device=""
+  local dry_run=""
+  local assume_yes=""
+  local bulk=""
+
+  while [[ -n "${1:-}" ]]
+  do
+    case "$1" in
+      -h|--help)
+        usage
+        return 0
+        ;;
+      -c|--config)
+        config="$2"
+        shift 2
+        ;;
+      -d|--device)
+        cli_device="$2"
+        shift 2
+        ;;
+      --dry-run)
+        dry_run=1
+        shift
+        ;;
+      -y|--yes|--noconfirm|--no-confirm)
+        assume_yes=1
+        shift
+        ;;
+      --bulk|--all-devices|--all)
+        bulk=1
+        shift
+        ;;
+      *)
+        log_error "Unknown option: $1"
+        usage >&2
+        return 2
+        ;;
+    esac
+  done
+
+  check_deps adb yq
+
+  if [[ ! -f "$config" ]]
+  then
+    log_error "Config file not found: $config"
+    return 2
+  fi
+
+  local devices_raw
+  if ! devices_raw="$(resolve_devices "$cli_device" "$config" "$bulk")"
+  then
+    return 2
+  fi
+
+  local -a devices
+  mapfile -t devices <<< "$devices_raw"
+
+  if [[ -z "$dry_run" && -z "$assume_yes" ]]
+  then
+    local -a names
+    mapfile -t names < <(yq -r '.apps[].name' "$config")
+    printf '%sAbout to uninstall %d app(s) from %d device(s):%s\n' "$C_BOLD" "${#names[@]}" "${#devices[@]}" "$C_RESET"
+    printf '  apps:    %s\n' "$(IFS=', '; echo "${names[*]}")"
+    printf '  devices: %s\n' "$(IFS=', '; echo "${devices[*]}")"
+
+    local reply
+    read -rp "Continue? [y/N] " reply
+    case "$reply" in
+      y|Y|yes|YES)
+        ;;
+      *)
+        log_step "Aborted"
+        return 0
+        ;;
+    esac
+  fi
+
+  local device overall_rc=0
+  for device in "${devices[@]}"
+  do
+    log_step "Target device: $device"
+    if ! for_each_app "$config" uninstall_app "$device" "$dry_run"
+    then
+      overall_rc=1
+    fi
+  done
+
+  return "$overall_rc"
+}
+
+cmd_clear_cache() {
+  local assume_yes=""
+  local -a pkgs=()
+
+  while [[ -n "${1:-}" ]]
+  do
+    case "$1" in
+      -h|--help)
+        usage
+        return 0
+        ;;
+      -y|--yes|--noconfirm|--no-confirm)
+        assume_yes=1
+        shift
+        ;;
+      -*)
+        log_error "Unknown option: $1"
+        usage >&2
+        return 2
+        ;;
+      *)
+        pkgs+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  if [[ ! -d "$CACHE_ROOT" ]]
+  then
+    log_step "Cache is already empty ($CACHE_ROOT)"
+    return 0
+  fi
+
+  if [[ ${#pkgs[@]} -eq 0 ]]
+  then
+    if [[ -z "$assume_yes" ]]
+    then
+      printf '%sThis will remove the entire APK cache at %s%s\n' "$C_BOLD" "$CACHE_ROOT" "$C_RESET"
+      local reply
+      read -rp "Continue? [y/N] " reply
+      case "$reply" in
+        y|Y|yes|YES)
+          ;;
+        *)
+          log_step "Aborted"
+          return 0
+          ;;
+      esac
+    fi
+
+    rm -rf "$CACHE_ROOT"
+    log_ok "Cache cleared: $CACHE_ROOT"
+    return 0
+  fi
+
+  local pkg dir
+  for pkg in "${pkgs[@]}"
+  do
+    dir="$(cache_dir_for "$pkg")"
+
+    if [[ ! -d "$dir" ]]
+    then
+      log_skip "$pkg (nothing cached)"
+      continue
+    fi
+
+    rm -rf "$dir"
+    log_ok "$pkg cache cleared"
+  done
+}
+
+main() {
+  if [[ -z "${1:-}" ]]
+  then
+    usage >&2
+    return 2
+  fi
+
+  local command="$1"
+  shift
+
+  case "$command" in
+    -h|--help)
+      usage
+      return 0
+      ;;
+    install)
+      cmd_install "$@"
+      ;;
+    uninstall)
+      cmd_uninstall "$@"
+      ;;
+    clear-cache)
+      cmd_clear_cache "$@"
+      ;;
+    *)
+      log_error "Unknown command: $command"
+      usage >&2
+      return 2
+      ;;
+  esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]
+then
+  main "$@"
+fi
+
+# vim: set ft=sh et ts=2 sw=2 :
