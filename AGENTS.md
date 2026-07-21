@@ -241,14 +241,83 @@ incomplete change, not a follow-up.
   flag; the flag only controls whether the codes survive into the
   *output*). Harmless for devices/diff, which never pre-embed anything for
   tsvtool to strip in the first place.
+- **`add`'s duplicate-pkg check used to pipe yq through `| head -1`, and
+  that silently killed the whole command.** Under `set -euo pipefail`,
+  `head -1` closing its read end after one line can SIGPIPE the upstream
+  producer before it's done writing; pipefail then reports that non-zero
+  exit as the *pipeline's* status, and since the whole thing was a plain
+  assignment (not an `if`/`while` condition), `set -e` aborted the script
+  right there with zero error output. Confirmed with a minimal repro
+  (`existing="$(cmd | head -1)"` under `set -euo pipefail` swallowing even
+  a bare `echo` after it). Fixed by doing the "just the first match" logic
+  inside the yq expression itself (`[...] | .[0] // ""`) instead of piping
+  through an external process at all -- no pipe, no SIGPIPE risk. This is
+  the same failure class as the `wait -n` bug above; the general lesson is
+  **never pipe a `set -e`-covered assignment through a command that exits
+  before consuming all of its input** (`head`, `sed q`, etc. are all
+  suspect).
+- **This yq (mikefarah/yq-go) has no jq-style `--arg NAME value` flag at
+  all.** `add_app_to_config` originally used `--arg` to pass `$name`/`$pkg`
+  into a yq expression, copying jq's convention without checking --
+  `yq --arg ...` just errors `unknown flag: --arg` (checked `yq --help`'s
+  full flag list, `--arg` isn't in it). The correct mechanism is yq's own
+  `env(VAR)` expression function, reading an actual process environment
+  variable: `VAR="$val" yq '...env(VAR)...'` (a command-prefix assignment)
+  scopes it to just that one invocation. Variable names are prefixed
+  `DECLAROID_` to avoid colliding with an unrelated already-set env var.
+- **`store: izzyondroid` runs every fdroidcl call through an isolated
+  XDG_CONFIG_HOME/XDG_CACHE_HOME, never the user's real fdroidcl config.**
+  fdroidcl merges every *enabled* repo in whichever config it's pointed at
+  into one combined index -- there's no per-repo scoping in `search`/
+  `show`/`install` at all -- and `fdroidcl repo add` isn't idempotent (it
+  errors if the name already exists) and permanently mutates that config.
+  Registering IzzyOnDroid in the real `~/.config/fdroidcl` would therefore
+  leak it into every future plain `store: fdroid` search/install too --
+  this isn't hypothetical, it actually happened once while building this
+  feature and had to be undone by hand (`fdroidcl repo remove izzyondroid`
+  against the real config, plus deleting the stray `izzyondroid.jar`/
+  `-etag` files it had already downloaded there). Two things to remember:
+  (1) overriding bare `$HOME` alone does **not** redirect fdroidcl -- it
+  reads `XDG_CONFIG_HOME`/`XDG_CACHE_HOME` directly, and those were already
+  set in the environment, taking priority; both must be overridden
+  together, which is what `izzyondroid_fdroidcl()` does. (2) The isolated
+  config also has F-Droid's own default repos (`f-droid`, `f-droid-archive`)
+  removed from it on first setup, leaving *only* IzzyOnDroid registered --
+  this is what makes `search --store izzyondroid` naturally scoped to just
+  that repo with zero extra filtering, instead of needing an extra
+  `fdroidcl show <pkg>` call per candidate to tell which repo a merged
+  result actually came from.
+- `fdroidcl setup` looks like it might help with repo management at a
+  glance ("mass installs onto an android device, excellent for backups")
+  but it's a different feature entirely -- named groups of apps+repos for
+  bulk provisioning (fdroidcl's own answer to what declaroid already does
+  at a higher level), and its `setup add-repo <NAME> <REPO-NAME>` only
+  *references* an already-registered repo by name, it doesn't add a new
+  repo URL. There's no shortcut around `fdroidcl repo add` for actually
+  registering IzzyOnDroid.
+- **A multi-statement `--preview` script for fzf must go in an executable
+  temp file, not be inlined as a quoted string.** The preview script's own
+  `printf` calls need single-quoted format strings (to keep `\033` etc
+  literal), and nesting those inside an outer `bash -c '...'` wrapper
+  breaks immediately: the *first* single quote inside the script
+  prematurely closes the outer one, spilling the rest of the script out as
+  unquoted text for the shell fzf spawns (zsh here) to choke on --
+  confirmed via real "bad pattern"/"command not found" errors from zsh
+  when tried inline, only visible by actually running the interactive
+  picker (a real pty, e.g. via `script -qec` or tmux -- this class of bug
+  does not show up from just reading the code). `pick_search_result` writes
+  the preview script to `mktemp`, `chmod +x`s it, and points `--preview` at
+  the file path directly, sidestepping the quoting-nesting problem
+  entirely since there's no shell re-parsing of the script's own content
+  involved.
 
 ## Nix packaging
 
 - `pkgs/declaroid/default.nix` wraps the script with `makeWrapper`, prefixing
   `PATH` with every runtime dependency (`android-tools`, `yq-go`, `gplaydl`,
-  `fdroidcl`, `curl`, `jq`, `util-linux` for `column`, `aapt` -- which,
-  confusingly, only actually provides an `aapt2` binary -- for
-  `generate-config`'s name resolution, coreutils, etc) and installs
+  `fdroidcl`, `fzf` (used by `add`'s picker), `curl`, `jq`, `util-linux` for
+  `column`, `aapt` -- which, confusingly, only actually provides an `aapt2`
+  binary -- for `generate-config`'s name resolution, coreutils, etc) and installs
   `completions/_declaroid` to `share/zsh/site-functions/_declaroid`.
   If the script starts shelling out to something new, add it to the
   `makeBinPath` list too -- and remember the wrapped runtime is plain

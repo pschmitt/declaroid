@@ -65,8 +65,8 @@ usage() {
 ${C_BOLD}Usage:${C_RESET} ${C_GREEN}declaroid${C_RESET} COMMAND [OPTIONS]
 
 Declarative Android app provisioning: define apps in YAML, install/uninstall
-them onto a device via adb, fetching from Google Play (gplaydl), F-Droid
-(fdroidcl), a GitHub repo's release assets, or a local APK file.
+them onto a device via adb, fetching from Google Play (gplaydl), F-Droid or
+IzzyOnDroid (fdroidcl), a GitHub repo's release assets, or a local APK file.
 
 ${C_BOLD}Commands:${C_RESET}
   ${C_CYAN}install${C_RESET}     Download (if not already cached) and install configured apps
@@ -74,8 +74,11 @@ ${C_BOLD}Commands:${C_RESET}
   ${C_CYAN}diff${C_RESET}        Show which configured apps are installed vs missing, no changes made
               (--full also lists device apps that aren't in the config)
   ${C_CYAN}search${C_RESET} QUERY
-              Search Google Play and/or F-Droid, print a colored TSV with
+              Search Google Play and/or F-Droid, print a colored table with
               clickable (OSC 8) links, no device or config needed
+  ${C_CYAN}add${C_RESET} QUERY
+              Search, then append the picked app to the config (fzf picker
+              with a preview of the YAML to be added, if more than one match)
   ${C_CYAN}devices${C_RESET}, ${C_CYAN}list${C_RESET}
               List connected adb devices (serial, model, codename, connection)
   ${C_CYAN}clear-cache${C_RESET} [PKG...]
@@ -97,9 +100,10 @@ ${C_BOLD}Options:${C_RESET}
       ${C_YELLOW}--no-labels, --fast${C_RESET} (generate-config only) Skip resolving app names via aapt2, use the package id instead (faster)
   ${C_YELLOW}-j, --jobs N${C_RESET}          (generate-config only) Resolve up to N app names in parallel (default: 6)
       ${C_YELLOW}--full${C_RESET}              (diff only) Also list device apps that aren't in the config, as "extra"
-      ${C_YELLOW}--store gplay|fdroid|all${C_RESET}
-                          (search only) Which store(s) to search (default: all)
-  ${C_YELLOW}-l, --limit N${C_RESET}          (search only) Max results per store (default: 10)
+      ${C_YELLOW}--store gplay|fdroid|izzyondroid|any${C_RESET}
+                          (search, add) Which store(s) to search (default: any;
+                          izzyondroid is opt-in, not part of "any")
+  ${C_YELLOW}-l, --limit N${C_RESET}          (search, add) Max results per store (default: 10)
       ${C_YELLOW}--sort-by KEY${C_RESET}       (diff, devices) Sort output, case-insensitively.
                           diff: name (default) or pkg. devices: serial
                           (default), model, codename, or connection.
@@ -123,7 +127,7 @@ devices (or, with --bulk, every connected device is used).
 
 ${C_BOLD}Config schema:${C_RESET}
   device: <adb serial or substring query>   # optional, see device resolution above
-  store: gplay|fdroid|github|local|url       # optional top-level default, defaults to gplay
+  store: gplay|fdroid|izzyondroid|github|local|url  # optional top-level default, defaults to gplay
   profile: <name>|<user id>|all|current       # optional top-level default (install only)
   profiles:                                   # optional, gives profile: short aliases
     - name: <alias, e.g. work>
@@ -131,7 +135,7 @@ ${C_BOLD}Config schema:${C_RESET}
   apps:
     - name: <display name>
       pkg: <package id>
-      store: gplay|fdroid|github|local|url  # optional, overrides the top-level default
+      store: gplay|fdroid|izzyondroid|github|local|url  # optional, overrides the top-level default
       repo: <owner>/<repo>          # required when store is github
       asset: <regex>                # (github only) selects the release asset;
                                      # default: '\\.apk\$'. Must match exactly one
@@ -157,9 +161,16 @@ the unauthenticated rate limit or access private repos. If a repo has no
 non-prerelease release, the most recent release (including prereleases) is
 used instead.
 
+izzyondroid is mechanically identical to fdroid (both go through fdroidcl),
+but through an isolated, IzzyOnDroid-only fdroidcl config under
+${CACHE_ROOT}/fdroidcl-izzyondroid/ -- not your regular fdroidcl config --
+so it never leaks IzzyOnDroid results into a plain \`store: fdroid\` and
+vice versa. Set up once automatically on first use.
+
 APKs downloaded from gplay/github/url are cached under ${CACHE_ROOT}/<package-id>/
-so repeated installs don't re-download (see --force-download). fdroid apps
-are cached by fdroidcl itself; local apps aren't cached (nothing to cache).
+so repeated installs don't re-download (see --force-download). fdroid and
+izzyondroid apps are cached by fdroidcl itself; local apps aren't cached
+(nothing to cache).
 
 Table output (devices, diff) is rendered with tsvtool if it's on \$PATH
 (https://github.com/pschmitt/tsvtool), otherwise with column -t.
@@ -637,6 +648,73 @@ install_fdroid() {
   ANDROID_SERIAL="$DEVICE_SERIAL" fdroidcl install "${user_args[@]}" "$CURRENT_PKG"
 }
 
+IZZYONDROID_REPO_URL='https://apt.izzysoft.de/fdroid/repo'
+IZZYONDROID_XDG_CONFIG_HOME="$CACHE_ROOT/fdroidcl-izzyondroid/config"
+IZZYONDROID_XDG_CACHE_HOME="$CACHE_ROOT/fdroidcl-izzyondroid/cache"
+
+# fdroidcl merges every *enabled* repo in its config into one combined
+# index -- there's no per-repo scoping in `search`/`show`/`install` at all
+# (checked: no --repo flag anywhere), and `fdroidcl repo add` isn't
+# idempotent, it permanently mutates whichever config it targets. Doing
+# that against the user's real ~/.config/fdroidcl would leak IzzyOnDroid
+# into every future *plain* `store: fdroid` search/install too -- not a
+# hypothetical, this actually happened once during testing here and had to
+# be undone by hand. Instead, all IzzyOnDroid-related fdroidcl calls run
+# through this wrapper, which points XDG_CONFIG_HOME/XDG_CACHE_HOME at a
+# declaroid-managed directory (fdroidcl reads those directly, confirmed by
+# testing: overriding bare $HOME alone does *not* redirect it, since
+# XDG_CONFIG_HOME/XDG_CACHE_HOME were already set in the environment and
+# take priority) containing *only* the IzzyOnDroid repo. That isolation is
+# a second win beyond just not polluting the real config: with nothing
+# else enabled in it, search/show/install against this wrapper are
+# naturally scoped to just IzzyOnDroid for free, no per-result `fdroidcl
+# show` filtering needed to tell IzzyOnDroid matches apart from
+# everyone else's.
+#
+# `fdroidcl setup` looks related to repo management at a glance ("mass
+# installs ... excellent for backups") but is a different feature entirely
+# -- named groups of apps+repos for bulk provisioning (fdroidcl's own
+# answer to what declaroid already does), and its `setup add-repo` only
+# *references* an already-registered repo by name, it doesn't add a new
+# repo URL. There's no shortcut around `fdroidcl repo add` for this.
+izzyondroid_fdroidcl() {
+  XDG_CONFIG_HOME="$IZZYONDROID_XDG_CONFIG_HOME" XDG_CACHE_HOME="$IZZYONDROID_XDG_CACHE_HOME" fdroidcl "$@"
+}
+
+ensure_izzyondroid_repo() {
+  mkdir -p "$IZZYONDROID_XDG_CONFIG_HOME" "$IZZYONDROID_XDG_CACHE_HOME"
+
+  if ! izzyondroid_fdroidcl repo 2>/dev/null | grep -qx 'Name: izzyondroid'
+  then
+    log_step "Setting up an isolated fdroidcl config for IzzyOnDroid"
+    # A fresh config comes with f-droid/f-droid-archive pre-enabled by
+    # default -- remove them so this isolated instance only ever knows
+    # about IzzyOnDroid (true single-repo scoping, not merely "enabled
+    # alongside the others").
+    izzyondroid_fdroidcl repo remove f-droid >/dev/null 2>&1 || true
+    izzyondroid_fdroidcl repo remove f-droid-archive >/dev/null 2>&1 || true
+    izzyondroid_fdroidcl repo add izzyondroid "$IZZYONDROID_REPO_URL"
+    # A freshly-added repo has no cached index at all -- fetch it once,
+    # right away, so the very first search/install right after registering
+    # doesn't come up empty.
+    log_step "Fetching the IzzyOnDroid index (first time only)"
+    izzyondroid_fdroidcl update
+  fi
+}
+
+# Mechanically like install_fdroid, but through the isolated wrapper --
+# ANDROID_SERIAL/-user targeting work exactly the same way, just with
+# XDG_CONFIG_HOME/XDG_CACHE_HOME also redirected.
+install_izzyondroid() {
+  ensure_izzyondroid_repo
+
+  local -a user_args=()
+  local user_val
+  user_val="$(effective_target_user)"
+  [[ -n "$user_val" ]] && user_args=(-user "$user_val")
+  ANDROID_SERIAL="$DEVICE_SERIAL" izzyondroid_fdroidcl install "${user_args[@]}" "$CURRENT_PKG"
+}
+
 install_local() {
   local -a apks
 
@@ -851,6 +929,9 @@ install_app() {
     fdroid)
       install_fdroid || rc=$?
       ;;
+    izzyondroid)
+      install_izzyondroid || rc=$?
+      ;;
     github)
       install_github || rc=$?
       ;;
@@ -861,7 +942,7 @@ install_app() {
       install_url || rc=$?
       ;;
     *)
-      log_error "Unknown store '$CURRENT_STORE' for $CURRENT_PKG (expected gplay, fdroid, github, local, or url)"
+      log_error "Unknown store '$CURRENT_STORE' for $CURRENT_PKG (expected gplay, fdroid, izzyondroid, github, local, or url)"
       rc=1
       ;;
   esac
@@ -1028,6 +1109,14 @@ cmd_install() {
     check_deps fdroidcl
     log_step "Updating F-Droid index"
     fdroidcl update
+  fi
+
+  if printf '%s\n' "${stores[@]}" | grep -qx izzyondroid
+  then
+    check_deps fdroidcl
+    ensure_izzyondroid_repo
+    log_step "Updating IzzyOnDroid index"
+    izzyondroid_fdroidcl update
   fi
 
   if printf '%s\n' "${stores[@]}" | grep -qx github
@@ -1330,6 +1419,10 @@ fdroid_app_url() {
   printf 'https://f-droid.org/packages/%s/\n' "$1"
 }
 
+izzyondroid_app_url() {
+  printf 'https://apt.izzysoft.de/fdroid/index/apk/%s\n' "$1"
+}
+
 # Runs `gplaydl search`, whose only output is a Rich-rendered table (no
 # --json/plain-text mode) with a fixed 3-column layout: "#", "Title",
 # "Package". Rich disables ANSI color automatically once stdout isn't a
@@ -1415,9 +1508,44 @@ search_fdroid() {
   done
 }
 
+# Same shape as search_fdroid, but through izzyondroid_fdroidcl's isolated,
+# IzzyOnDroid-only config -- since nothing else is enabled there, results
+# are naturally scoped to just that repo, no per-result `fdroidcl show`
+# filtering needed (unlike a naive approach layered on the user's real,
+# multi-repo fdroidcl config would require).
+search_izzyondroid() {
+  local query="$1"
+  local limit="$2"
+  local count=0
+
+  ensure_izzyondroid_repo >&2
+
+  local -a lines
+  mapfile -t lines < <(izzyondroid_fdroidcl search "(?i)$query" 2>/dev/null)
+
+  local line pkg rest name
+  for line in "${lines[@]}"
+  do
+    [[ "$line" =~ ^[[:space:]] ]] && continue
+    [[ -z "$line" ]] && continue
+    [[ "$line" =~ ^([^[:space:]]+)[[:space:]]+(.*)$ ]] || continue
+
+    pkg="${BASH_REMATCH[1]}"
+    rest="${BASH_REMATCH[2]}"
+
+    name="$rest"
+    [[ "$rest" =~ ^(.*)\ -\ (.+)$ ]] && name="${BASH_REMATCH[1]}"
+
+    printf '%s\t%s\tizzyondroid\t\n' "$name" "$pkg"
+
+    count=$((count + 1))
+    [[ $count -ge $limit ]] && break
+  done
+}
+
 cmd_search() {
   local query=""
-  local store="all"
+  local store="any"
   local limit=10
 
   while [[ -n "${1:-}" ]]
@@ -1460,20 +1588,20 @@ cmd_search() {
   fi
 
   case "$store" in
-    gplay | fdroid | all)
+    gplay | fdroid | izzyondroid | any)
       ;;
     *)
-      log_error "Invalid --store value: $store (expected gplay, fdroid, or all)"
+      log_error "Invalid --store value: $store (expected gplay, fdroid, izzyondroid, or any)"
       return 2
       ;;
   esac
 
-  if [[ "$store" == gplay || "$store" == all ]]
+  if [[ "$store" == gplay || "$store" == any ]]
   then
     check_deps gplaydl
   fi
 
-  if [[ "$store" == fdroid || "$store" == all ]]
+  if [[ "$store" == fdroid || "$store" == izzyondroid || "$store" == any ]]
   then
     check_deps fdroidcl
   fi
@@ -1493,11 +1621,14 @@ cmd_search() {
   # slightly when hyperlinks are active and tsvtool isn't installed --
   # accepted since tsvtool is always available in this project's own
   # environment.
+  # izzyondroid is deliberately not part of "any" -- it's a separate,
+  # explicit opt-in (registering/updating its isolated fdroidcl config has
+  # real cost the first time), not something every search should pay for.
   local -a all_rows=()
   local -a rows
   local row name pkg app_store
 
-  if [[ "$store" == gplay || "$store" == all ]]
+  if [[ "$store" == gplay || "$store" == any ]]
   then
     log_step "Searching Google Play for \"$query\""
     mapfile -t rows < <(search_gplay "$query" "$limit")
@@ -1508,7 +1639,7 @@ cmd_search() {
     done
   fi
 
-  if [[ "$store" == fdroid || "$store" == all ]]
+  if [[ "$store" == fdroid || "$store" == any ]]
   then
     log_step "Searching F-Droid for \"$query\""
     mapfile -t rows < <(search_fdroid "$query" "$limit")
@@ -1516,6 +1647,17 @@ cmd_search() {
     do
       IFS=$'\t' read -r name pkg app_store _ <<< "$row"
       all_rows+=("$(hyperlink "$(fdroid_app_url "$pkg")" "$name")"$'\t'"$pkg"$'\t'"$app_store")
+    done
+  fi
+
+  if [[ "$store" == izzyondroid ]]
+  then
+    log_step "Searching IzzyOnDroid for \"$query\""
+    mapfile -t rows < <(search_izzyondroid "$query" "$limit")
+    for row in "${rows[@]}"
+    do
+      IFS=$'\t' read -r name pkg app_store _ <<< "$row"
+      all_rows+=("$(hyperlink "$(izzyondroid_app_url "$pkg")" "$name")"$'\t'"$pkg"$'\t'"$app_store")
     done
   fi
 
@@ -1528,7 +1670,316 @@ cmd_search() {
   {
     printf 'NAME\tPKG\tSTORE\n'
     printf '%s\n' "${all_rows[@]}"
-  } | render_table | colorize_word gplay "$C_BLUE" | colorize_word fdroid "$C_GREEN"
+  } | render_table | colorize_word gplay "$C_BLUE" | colorize_word fdroid "$C_GREEN" | colorize_word izzyondroid "$C_CYAN"
+}
+
+# Interactive fzf picker for `add`'s search matches: one line per match in
+# the list, a preview pane showing the app's info and the exact YAML that
+# would be appended to $config. $default_store is a plain value (looked up
+# once by the caller, same for every row) baked directly into the preview
+# script text -- no per-keystroke yq call needed. Colors/bold/italic are
+# emitted unconditionally here (not gated on $C_*/-t 1 like the rest of the
+# script) because fzf itself requires a real controlling terminal to run at
+# all, so by the time this function is reached we already know stdout is
+# interactive. Prints the chosen row as "name\tpkg\tstore" on success;
+# returns 1 with no output if the user cancels (Esc/Ctrl-C).
+pick_search_result() {
+  local config="$1"
+  local default_store="$2"
+  shift 2
+  local -a match_rows=("$@")
+
+  local max_name=0 max_pkg=0
+  local row name pkg store
+  for row in "${match_rows[@]}"
+  do
+    IFS=$'\t' read -r name pkg store <<< "$row"
+    [[ ${#name} -gt $max_name ]] && max_name=${#name}
+    [[ ${#pkg} -gt $max_pkg ]] && max_pkg=${#pkg}
+  done
+
+  local -a fzf_lines=()
+  local display store_colored
+  for row in "${match_rows[@]}"
+  do
+    IFS=$'\t' read -r name pkg store <<< "$row"
+    case "$store" in
+      gplay)
+        store_colored=$'\e[34m'"$store"$'\e[0m'
+        ;;
+      fdroid)
+        store_colored=$'\e[32m'"$store"$'\e[0m'
+        ;;
+      izzyondroid)
+        store_colored=$'\e[36m'"$store"$'\e[0m'
+        ;;
+      *)
+        store_colored="$store"
+        ;;
+    esac
+    display="$(printf '%-*s  %-*s  %s' "$max_name" "$name" "$max_pkg" "$pkg" "$store_colored")"
+    fzf_lines+=("$display"$'\t'"$name"$'\t'"$pkg"$'\t'"$store")
+  done
+
+  # Written to an executable temp file rather than inlined as a quoted
+  # string in --preview -- the preview script's own printf calls need
+  # single-quoted format strings (to keep \033 etc literal), and nesting
+  # those inside an outer `bash -c '...'` wrapper breaks immediately: the
+  # first single quote *inside* the script prematurely closes the outer
+  # one, spilling the rest of the script out as unquoted text for
+  # fzf's/zsh's own top-level parser to choke on (confirmed: this produced
+  # "bad pattern"/"command not found" errors from zsh when tried inline).
+  # A temp file sidesteps quoting nesting entirely -- fzf just executes it
+  # with args, no shell re-parsing of its contents involved.
+  # A non-quoted heredoc so $config/$default_store expand *now* (fixed for
+  # the whole picker); \$1/\$2/\$3 are escaped so they stay literal, to be
+  # filled in from argv when fzf invokes this file with {2} {3} {4}
+  # (fzf shell-quotes those substitutions safely, even if a title has
+  # spaces/quotes in it).
+  local preview_file
+  preview_file="$(mktemp)"
+  cat > "$preview_file" <<EOF
+#!/usr/bin/env bash
+name="\$1"
+pkg="\$2"
+store="\$3"
+printf '\033[1m\033[36mApp\033[0m\n'
+printf '  Name:  %s\n' "\$name"
+printf '  Pkg:   %s\n' "\$pkg"
+case "\$store" in
+  gplay)
+    printf '  Store: \033[34m%s\033[0m\n' "\$store"
+    ;;
+  fdroid)
+    printf '  Store: \033[32m%s\033[0m\n' "\$store"
+    ;;
+  izzyondroid)
+    printf '  Store: \033[36m%s\033[0m\n' "\$store"
+    ;;
+esac
+printf '\n\033[1m\033[36mWill append to $config:\033[0m\n'
+printf '\033[3m  - name: "%s"\033[0m\n' "\$name"
+printf '\033[3m    pkg: %s\033[0m\n' "\$pkg"
+if [[ "\$store" != "$default_store" ]]
+then
+  printf '\033[3m    store: %s\033[0m\n' "\$store"
+fi
+EOF
+  chmod +x "$preview_file"
+
+  local selection
+  selection="$(printf '%s\n' "${fzf_lines[@]}" | fzf \
+    --ansi \
+    --delimiter=$'\t' \
+    --with-nth=1 \
+    --preview="$preview_file {2} {3} {4}" \
+    --preview-window=right:60%:wrap \
+    --header='Multiple matches -- Enter to add, Esc to cancel' \
+    --prompt='Add> ')"
+
+  rm -f "$preview_file"
+
+  if [[ -z "$selection" ]]
+  then
+    return 1
+  fi
+
+  local chosen_name chosen_pkg chosen_store
+  IFS=$'\t' read -r _ chosen_name chosen_pkg chosen_store <<< "$selection"
+  printf '%s\t%s\t%s\n' "$chosen_name" "$chosen_pkg" "$chosen_store"
+}
+
+# Appends a search-selected app to $config's `apps:` list via a plain
+# structural `.apps += [...]` yq mutation, not a text-based insert --
+# verified empirically against this project's own real generated configs
+# (header comments, `profiles:`, commented-out `# TODO` entries) that this
+# leaves every other byte of the file untouched; yq's go-yaml-based comment
+# model round-trips it cleanly (confirmed via `diff` against the original).
+# `name` is forced to double-quoted style explicitly (`style="double"`) to
+# match generate-config's own quoting convention (yaml_quote_scalar quotes
+# name, never pkg/store) -- left to yq's default, a freshly-appended scalar
+# comes out unquoted, which would look inconsistent next to the rest of a
+# generate-config-produced file.
+add_app_to_config() {
+  local config="$1"
+  local name="$2"
+  local pkg="$3"
+  local store="$4"
+
+  # This yq (mikefarah/yq-go) has no jq-style `--arg NAME value` flag at
+  # all -- confirmed the hard way (`Error: unknown flag: --arg`), after
+  # wrongly assuming jq-compatible arg-passing without checking first. The
+  # correct mechanism here is yq's `env(VAR)` expression function, reading
+  # an actual process environment variable; `VAR="$val" yq '...env(VAR)...'`
+  # (a command-prefix assignment) scopes it to just that one invocation
+  # without polluting the shell's environment. Names are prefixed
+  # DECLAROID_ to avoid any chance of colliding with an unrelated
+  # already-set env var.
+  local existing
+  existing="$(DECLAROID_PKG="$pkg" yq -r '[.apps[] | select(.pkg == env(DECLAROID_PKG)) | .pkg] | .[0] // ""' "$config")"
+
+  if [[ -n "$existing" ]]
+  then
+    log_skip "$name ($pkg) already in $config"
+    return 0
+  fi
+
+  local default_store
+  default_store="$(yq -r '.store // "gplay"' "$config")"
+
+  if [[ "$store" == "$default_store" ]]
+  then
+    DECLAROID_NAME="$name" DECLAROID_PKG="$pkg" yq -i \
+      '.apps += [{"name": env(DECLAROID_NAME), "pkg": env(DECLAROID_PKG)}] | .apps[-1].name style="double"' \
+      "$config"
+  else
+    DECLAROID_NAME="$name" DECLAROID_PKG="$pkg" DECLAROID_STORE="$store" yq -i \
+      '.apps += [{"name": env(DECLAROID_NAME), "pkg": env(DECLAROID_PKG), "store": env(DECLAROID_STORE)}] | .apps[-1].name style="double"' \
+      "$config"
+  fi
+
+  log_ok "Added $name ($pkg) to $config"
+}
+
+cmd_add() {
+  local config="$DEFAULT_CONFIG"
+  local store="any"
+  local limit=10
+  local query=""
+
+  while [[ -n "${1:-}" ]]
+  do
+    case "$1" in
+      -h|--help)
+        usage
+        return 0
+        ;;
+      -c|--config)
+        config="$2"
+        shift 2
+        ;;
+      --store)
+        store="$2"
+        shift 2
+        ;;
+      -l|--limit)
+        limit="$2"
+        shift 2
+        ;;
+      -*)
+        log_error "Unknown option: $1"
+        usage >&2
+        return 2
+        ;;
+      *)
+        if [[ -n "$query" ]]
+        then
+          query="$query $1"
+        else
+          query="$1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "$query" ]]
+  then
+    log_error "add requires a query"
+    usage >&2
+    return 2
+  fi
+
+  case "$store" in
+    gplay | fdroid | izzyondroid | any)
+      ;;
+    *)
+      log_error "Invalid --store value: $store (expected gplay, fdroid, izzyondroid, or any)"
+      return 2
+      ;;
+  esac
+
+  if [[ ! -f "$config" ]]
+  then
+    log_error "Config file not found: $config"
+    return 2
+  fi
+
+  check_deps yq fzf
+
+  if [[ "$store" == gplay || "$store" == any ]]
+  then
+    check_deps gplaydl
+  fi
+
+  if [[ "$store" == fdroid || "$store" == izzyondroid || "$store" == any ]]
+  then
+    check_deps fdroidcl
+  fi
+
+  local -a all_rows=()
+  local -a rows
+  local row name pkg app_store
+
+  if [[ "$store" == gplay || "$store" == any ]]
+  then
+    log_step "Searching Google Play for \"$query\""
+    mapfile -t rows < <(search_gplay "$query" "$limit")
+    for row in "${rows[@]}"
+    do
+      IFS=$'\t' read -r name pkg app_store _ <<< "$row"
+      all_rows+=("$name"$'\t'"$pkg"$'\t'"$app_store")
+    done
+  fi
+
+  if [[ "$store" == fdroid || "$store" == any ]]
+  then
+    log_step "Searching F-Droid for \"$query\""
+    mapfile -t rows < <(search_fdroid "$query" "$limit")
+    for row in "${rows[@]}"
+    do
+      IFS=$'\t' read -r name pkg app_store _ <<< "$row"
+      all_rows+=("$name"$'\t'"$pkg"$'\t'"$app_store")
+    done
+  fi
+
+  if [[ "$store" == izzyondroid ]]
+  then
+    log_step "Searching IzzyOnDroid for \"$query\""
+    mapfile -t rows < <(search_izzyondroid "$query" "$limit")
+    for row in "${rows[@]}"
+    do
+      IFS=$'\t' read -r name pkg app_store _ <<< "$row"
+      all_rows+=("$name"$'\t'"$pkg"$'\t'"$app_store")
+    done
+  fi
+
+  if [[ ${#all_rows[@]} -eq 0 ]]
+  then
+    log_error "No results found for \"$query\""
+    return 1
+  fi
+
+  local chosen_name chosen_pkg chosen_store
+
+  if [[ ${#all_rows[@]} -eq 1 ]]
+  then
+    IFS=$'\t' read -r chosen_name chosen_pkg chosen_store <<< "${all_rows[0]}"
+    log_step "Found: $chosen_name ($chosen_pkg) [$chosen_store]"
+  else
+    local default_store
+    default_store="$(yq -r '.store // "gplay"' "$config")"
+
+    local chosen
+    if ! chosen="$(pick_search_result "$config" "$default_store" "${all_rows[@]}")"
+    then
+      log_step "Cancelled"
+      return 0
+    fi
+    IFS=$'\t' read -r chosen_name chosen_pkg chosen_store <<< "$chosen"
+  fi
+
+  add_app_to_config "$config" "$chosen_name" "$chosen_pkg" "$chosen_store"
 }
 
 cmd_devices() {
@@ -2261,6 +2712,9 @@ main() {
       ;;
     search)
       cmd_search "$@"
+      ;;
+    add)
+      cmd_add "$@"
       ;;
     generate-config|dump)
       cmd_generate_config "$@"

@@ -4,11 +4,13 @@ Declarative Android app provisioning. Define the apps you want on a device in
 a YAML file, then `declaroid install` fetches and installs them, `declaroid
 uninstall` removes them, and already-installed apps are skipped automatically.
 
-Apps can come from four sources:
+Apps can come from five sources:
 
 - **Google Play**, via [gplaydl](https://github.com/rehmatworks/gplaydl)
   (anonymous authentication, no Google account needed)
 - **F-Droid**, via [fdroidcl](https://github.com/Hoverth/fdroidcl)
+- **IzzyOnDroid**, also via fdroidcl, through an isolated fdroidcl config so
+  it never mixes into a plain `store: fdroid`
 - **GitHub releases**, downloaded directly from a repo's release assets
   (à la [Obtainium](https://github.com/ImranR98/Obtainium))
 - **Local APK files** already on disk
@@ -99,8 +101,10 @@ dependencies are:
 - [`gplaydl`](https://github.com/rehmatworks/gplaydl) -- only needed for
   `store: gplay` apps
 - [`fdroidcl`](https://github.com/Hoverth/fdroidcl) -- only needed for
-  `store: fdroid` apps (declaroid checks for it lazily, only if your config
-  actually uses the fdroid store)
+  `store: fdroid`/`store: izzyondroid` apps (declaroid checks for it lazily,
+  only if your config actually uses one of those stores)
+- [`fzf`](https://github.com/junegunn/fzf) -- only needed by `add` when a
+  search matches more than one app
 - `aapt2` (nixpkgs: `aapt`) -- optional, only used by `generate-config` to
   read human-readable app names; falls back to the package ID if missing
 - [`tsvtool`](https://github.com/pschmitt/tsvtool) -- optional, prettier
@@ -122,6 +126,7 @@ $ declaroid COMMAND [OPTIONS]
 | `uninstall` | Uninstall configured apps (no download) |
 | `diff` | Show which configured apps are installed vs missing, no changes made (`--full`: also list device apps not in the config) |
 | `search QUERY` | Search Google Play and/or F-Droid; no device or config needed |
+| `add QUERY` | Search, then append the picked app to the config (fzf picker if more than one match) |
 | `devices`, `list` | List connected adb devices (serial, model, codename, connection) |
 | `clear-cache [PKG...]` | Remove cached APK downloads, all of them or just the given package(s) |
 | `generate-config`, `dump` | Print a YAML config seeded from what's installed on a device |
@@ -141,8 +146,8 @@ $ declaroid COMMAND [OPTIONS]
 | `--no-labels, --fast` | generate-config | Skip app name resolution, use the package id instead |
 | `-j, --jobs N` | generate-config | Resolve up to N app names in parallel (default: 6) |
 | `--full` | diff | Also list device apps that aren't in the config, as `extra` |
-| `--store gplay\|fdroid\|all` | search | Which store(s) to search (default: `all`) |
-| `-l, --limit N` | search | Max results per store (default: 10) |
+| `--store gplay\|fdroid\|izzyondroid\|any` | search, add | Which store(s) to search (default: `any`; `izzyondroid` is opt-in, not part of `any`) |
+| `-l, --limit N` | search, add | Max results per store (default: 10) |
 | `--sort-by KEY` | diff, devices | Sort output case-insensitively. diff: `name` (default) or `pkg`. devices: `serial` (default), `model`, `codename`, or `connection` |
 | `--bulk, --all-devices, --all` | all | Target every matching device instead of erroring out on ambiguity |
 | `-h, --help` | all | Show help |
@@ -300,6 +305,28 @@ once per `install` invocation if any configured app uses this store.
 fdroidcl manages its own APK cache; declaroid doesn't wrap it in its own
 cache directory.
 
+#### `izzyondroid`
+
+[IzzyOnDroid](https://apt.izzysoft.de/fdroid/) is a separate F-Droid-format
+repo (Aliucord, microG, and other apps that don't fit F-Droid's own
+build-from-source policy). Mechanically identical to `fdroid` -- same
+`fdroidcl install`/`fdroidcl search` -- but fdroidcl merges every *enabled*
+repo in a given config into one combined index with no way to scope a
+single command to just one repo, and `fdroidcl repo add` isn't idempotent
+(it errors if the repo's already registered) and permanently mutates
+whichever config it targets. Registering IzzyOnDroid in your real,
+system-wide fdroidcl config would therefore leak its apps into every future
+plain `store: fdroid` search/install too.
+
+To avoid that, every `store: izzyondroid` operation runs through an
+isolated fdroidcl config under
+`${XDG_CACHE_HOME:-$HOME/.cache}/declaroid/fdroidcl-izzyondroid/`, seeded on
+first use with *only* the IzzyOnDroid repo (F-Droid's own default repos are
+removed from it). That isolation is also what makes `search`/`add
+--store izzyondroid` correctly scoped to just IzzyOnDroid results with no
+extra filtering -- there's nothing else registered in that config to mix
+in. Your real `~/.config/fdroidcl` is never touched by this.
+
 #### `github`
 
 Fetches an APK straight from a GitHub repo's releases, no F-Droid/Play Store
@@ -385,17 +412,47 @@ to the store listing (supported by kitty, wezterm, iTerm2, and VTE-based
 terminals like foot/gnome-terminal) -- the app name is the clickable text,
 there's no separate URL column.
 
-`--store` picks `gplay`, `fdroid`, or `all` (default). `-l`/`--limit` caps
-results *per store* (default 10), so `--store all -l 10` can return up to
-20 rows total. Google Play search comes from `gplaydl search`, which has no
-version info to offer; F-Droid search comes from `fdroidcl search`, which
-does a fuzzy full-text match against name/summary/description (a query like
-"whatsapp" can surface apps that just mention it, not just apps named it).
+`--store` picks `gplay`, `fdroid`, `izzyondroid`, or `any` (default). `any`
+means gplay + fdroid -- `izzyondroid` is a separate, explicit opt-in (see
+[the izzyondroid store](#izzyondroid) for why), not folded into `any`.
+`-l`/`--limit` caps results *per store* (default 10), so `--store any -l 10`
+can return up to 20 rows total. Google Play search comes from `gplaydl
+search`, which has no version info to offer; F-Droid/IzzyOnDroid search
+comes from `fdroidcl search`, which does a fuzzy full-text match against
+name/summary/description (a query like "whatsapp" can surface apps that
+just mention it, not just apps named it).
 
-Both stores are searched case-insensitively. Google Play's search is
-case-insensitive on its own; F-Droid's isn't (its query is a regexp
+All stores are searched case-insensitively. Google Play's search is
+case-insensitive on its own; fdroidcl's isn't (its query is a regexp
 matched case-sensitively by default), so declaroid prefixes it with the
 Go regexp `(?i)` flag.
+
+### `add`: search, then append to the config
+
+`declaroid add QUERY [--store ...] [-c FILE]` runs the same search as
+`declaroid search`, then appends the result you pick to the config's
+`apps:` list:
+
+```console
+$ declaroid add whatsapp --store gplay
+==> Searching Google Play for "whatsapp"
+==> Found: WhatsApp Messenger (com.whatsapp) [gplay]
+[ok] Added WhatsApp Messenger (com.whatsapp) to ~/.config/declaroid/apps.yaml
+```
+
+If exactly one match is found, it's added directly (no prompt). With more
+than one match, an [fzf](https://github.com/junegunn/fzf) picker opens: the
+list shows name/pkg/store per candidate, and the preview pane shows the
+app's info plus the exact YAML that would be appended, colored/bold/italic.
+Esc cancels without changing anything.
+
+The append itself is a structural `yq` edit (`.apps += [...]`), not a
+text-based insert -- verified against real, hand-commented, `generate-config`-produced files that it leaves every other byte of the file
+untouched (header comments, `profiles:`, commented-out `# TODO` entries all
+survive). If the picked package is already in the config, `add` skips it
+(`[skip] ... already in ...`) rather than adding a duplicate entry. The new
+entry's `store:` is only written out if it differs from the config's
+top-level default (same convention as `generate-config`).
 
 ### Table output
 

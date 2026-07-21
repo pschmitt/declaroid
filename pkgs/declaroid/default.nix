@@ -16,6 +16,7 @@
   aapt,
   gplaydl,
   fdroidcl,
+  fzf,
 }:
 
 stdenvNoCC.mkDerivation {
@@ -53,6 +54,7 @@ stdenvNoCC.mkDerivation {
           aapt
           gplaydl
           fdroidcl
+          fzf
         ]
       }
 

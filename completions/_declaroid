@@ -58,6 +58,7 @@ _declaroid_commands() {
     'uninstall:Uninstall configured apps (no download)'
     'diff:Show installed vs missing apps, no changes made'
     'search:Search Google Play and/or F-Droid'
+    'add:Search, then append the picked app to the config'
     'devices:List connected adb devices'
     'list:Alias for devices'
     'clear-cache:Remove cached APK downloads'
@@ -98,7 +99,14 @@ _declaroid() {
           ;;
         search)
           _arguments \
-            '--store[Store(s) to search]:store:(gplay fdroid all)' \
+            '--store[Store(s) to search]:store:(gplay fdroid izzyondroid any)' \
+            '(-l --limit)'{-l,--limit}'[Max results per store]:limit' \
+            '(-h --help)'{-h,--help}'[Show help]'
+          ;;
+        add)
+          _arguments \
+            '(-c --config)'{-c,--config}'[Path to the apps YAML config]:file:_files' \
+            '--store[Store(s) to search]:store:(gplay fdroid izzyondroid any)' \
             '(-l --limit)'{-l,--limit}'[Max results per store]:limit' \
             '(-h --help)'{-h,--help}'[Show help]'
           ;;
