@@ -120,7 +120,7 @@ $ declaroid COMMAND [OPTIONS]
 |---|---|
 | `install` | Download (if not already cached) and install configured apps |
 | `uninstall` | Uninstall configured apps (no download) |
-| `diff` | Show which configured apps are installed vs missing, no changes made |
+| `diff` | Show which configured apps are installed vs missing, no changes made (`--full`: also list device apps not in the config) |
 | `devices`, `list` | List connected adb devices (serial, model, codename, connection) |
 | `clear-cache [PKG...]` | Remove cached APK downloads, all of them or just the given package(s) |
 | `generate-config`, `dump` | Print a YAML config seeded from what's installed on a device |
@@ -133,11 +133,13 @@ $ declaroid COMMAND [OPTIONS]
 | `-d, --device QUERY` | all | Target device (see [device matching](#device-matching)) |
 | `--dry-run` | install, uninstall | Print what would happen, don't do it |
 | `-f, --force-download` | install | Re-download even if a cached copy exists |
-| `-y, --yes, --noconfirm, --no-confirm` | uninstall, clear-cache | Skip the confirmation prompt |
+| `--enforce` | install | Also uninstall device apps that aren't in the config (prompts once per device) |
+| `-y, --yes, --noconfirm, --no-confirm` | install --enforce, uninstall, clear-cache | Skip the confirmation prompt |
 | `-o, --output FILE` | generate-config | Write to FILE instead of stdout |
 | `--system` | generate-config | Include system apps too (default: third-party only) |
 | `--no-labels, --fast` | generate-config | Skip app name resolution, use the package id instead |
 | `-j, --jobs N` | generate-config | Resolve up to N app names in parallel (default: 6) |
+| `--full` | diff | Also list device apps that aren't in the config, as `extra` |
 | `--sort-by KEY` | diff, devices | Sort output case-insensitively. diff: `name` (default) or `pkg`. devices: `serial` (default), `model`, `codename`, or `connection` |
 | `--bulk, --all-devices, --all` | all | Target every matching device instead of erroring out on ambiguity |
 | `-h, --help` | all | Show help |
@@ -360,14 +362,32 @@ downloads. local apps aren't cached either -- there's nothing to download.
 `declaroid devices` and `declaroid diff` render as a table: using
 [tsvtool](https://github.com/pschmitt/tsvtool) if it's on `$PATH`, falling
 back to `column -t` (with a bolded header) otherwise. `diff` additionally
-colors `installed` green and `missing` yellow regardless of which renderer
-was used.
+colors `installed` green, `missing` yellow, and (with `--full`) `extra` red,
+regardless of which renderer was used.
+
+### `diff --full`: what's installed but not configured
+
+Plain `diff` only ever looks at apps *in the config* and reports
+installed/missing for each. `--full` additionally lists every device app
+that has no matching `pkg:` entry anywhere in the config, as a third status,
+`extra` -- the same GMS/AOSP denylist `generate-config` uses keeps system
+plumbing out of that list. This is a read against the device only (a single
+`pm list packages -3`); it doesn't resolve app names via `aapt2`, so `extra`
+rows show the package id in both the name and pkg columns.
 
 ### Uninstall confirmation
 
 `uninstall` lists the apps and device(s) it's about to touch and asks for
 confirmation, unless `--dry-run` or `-y`/`--yes`/`--noconfirm`/`--no-confirm`
 is given.
+
+### `install --enforce`: removing what's not configured
+
+`install --enforce` runs the normal install, then -- per device -- finds the
+same "extra" apps `diff --full` would report and offers to uninstall them,
+prompting once for the whole batch (not once per app). Skip the prompt with
+`-y`/`--yes`/`--noconfirm`/`--no-confirm`, or preview it without uninstalling
+anything via `--dry-run`.
 
 ## Shell completion
 

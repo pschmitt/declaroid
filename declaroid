@@ -5,6 +5,12 @@ set -euo pipefail
 DEFAULT_CONFIG="${DECLAROID_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/declaroid/apps.yaml}"
 CACHE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/declaroid"
 
+# Populated by load_profile_aliases from the config's top-level `profiles:`
+# list (name -> id). Declared here (not just inside load_profile_aliases)
+# so effective_target_user can safely reference it even before it's been
+# loaded, or when a config has no `profiles:` section at all.
+declare -A PROFILE_ALIASES=()
+
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]
 then
   C_RESET=$'\e[0m'
@@ -56,6 +62,7 @@ ${C_BOLD}Commands:${C_RESET}
   ${C_CYAN}install${C_RESET}     Download (if not already cached) and install configured apps
   ${C_CYAN}uninstall${C_RESET}   Uninstall configured apps (no download)
   ${C_CYAN}diff${C_RESET}        Show which configured apps are installed vs missing, no changes made
+              (--full also lists device apps that aren't in the config)
   ${C_CYAN}devices${C_RESET}, ${C_CYAN}list${C_RESET}
               List connected adb devices (serial, model, codename, connection)
   ${C_CYAN}clear-cache${C_RESET} [PKG...]
@@ -68,12 +75,15 @@ ${C_BOLD}Options:${C_RESET}
   ${C_YELLOW}-d, --device QUERY${C_RESET}      Target device (also settable via \$TARGET_DEVICE)
       ${C_YELLOW}--dry-run${C_RESET}           Print what would happen without downloading/installing/uninstalling
   ${C_YELLOW}-f, --force-download${C_RESET}    (install only) Re-download even if a cached copy exists
+      ${C_YELLOW}--enforce${C_RESET}           (install only) Also uninstall device apps that aren't in the config
+                          (prompts once per device; see -y below)
   ${C_YELLOW}-y, --yes, --noconfirm, --no-confirm${C_RESET}
-                          (uninstall/clear-cache) Skip the confirmation prompt
+                          (install --enforce/uninstall/clear-cache) Skip the confirmation prompt
   ${C_YELLOW}-o, --output FILE${C_RESET}       (generate-config only) Write to FILE instead of stdout
       ${C_YELLOW}--system${C_RESET}            (generate-config only) Include system apps too (default: third-party only)
       ${C_YELLOW}--no-labels, --fast${C_RESET} (generate-config only) Skip resolving app names via aapt2, use the package id instead (faster)
   ${C_YELLOW}-j, --jobs N${C_RESET}          (generate-config only) Resolve up to N app names in parallel (default: 6)
+      ${C_YELLOW}--full${C_RESET}              (diff only) Also list device apps that aren't in the config, as "extra"
       ${C_YELLOW}--sort-by KEY${C_RESET}       (diff, devices) Sort output, case-insensitively.
                           diff: name (default) or pkg. devices: serial
                           (default), model, codename, or connection.
@@ -97,12 +107,15 @@ devices (or, with --bulk, every connected device is used).
 
 ${C_BOLD}Config schema:${C_RESET}
   device: <adb serial or substring query>   # optional, see device resolution above
-  store: gplay|fdroid|github|local           # optional top-level default, defaults to gplay
-  profile: <user id>|all|current              # optional top-level default (install only)
+  store: gplay|fdroid|github|local|url       # optional top-level default, defaults to gplay
+  profile: <name>|<user id>|all|current       # optional top-level default (install only)
+  profiles:                                   # optional, gives profile: short aliases
+    - name: <alias, e.g. work>
+      id: <user id, e.g. 10>
   apps:
     - name: <display name>
       pkg: <package id>
-      store: gplay|fdroid|github|local  # optional, overrides the top-level default
+      store: gplay|fdroid|github|local|url  # optional, overrides the top-level default
       repo: <owner>/<repo>          # required when store is github
       asset: <regex>                # (github only) selects the release asset;
                                      # default: '\\.apk\$'. Must match exactly one
@@ -111,18 +124,24 @@ ${C_BOLD}Config schema:${C_RESET}
       path: <file, glob, or dir>    # required when store is local; a single apk
                                      # file, a glob matching one or more splits, or
                                      # a directory (every *.apk directly inside it).
-      profile: <user id>|all|current  # optional, overrides the top-level default;
+      url: <http(s) URL>            # required when store is url; a direct link to
+                                     # a single apk file, fetched at install time.
+      profile: <name>|<user id>|all|current
+                                     # optional, overrides the top-level default;
                                      # which Android user/profile to install for
-                                     # (e.g. a Work Profile). Unset means: use
-                                     # whatever the device reports as its current
-                                     # profile -- never defaults to "all".
+                                     # (e.g. a Work Profile). A name here is looked
+                                     # up against profiles: above if present, else
+                                     # used literally (a bare id needs no profiles:
+                                     # entry at all). Unset means: use whatever the
+                                     # device reports as its current profile --
+                                     # never defaults to "all".
 
 github releases are queried via the GitHub API; set \$GITHUB_TOKEN to raise
 the unauthenticated rate limit or access private repos. If a repo has no
 non-prerelease release, the most recent release (including prereleases) is
 used instead.
 
-APKs downloaded from gplay/github are cached under ${CACHE_ROOT}/<package-id>/
+APKs downloaded from gplay/github/url are cached under ${CACHE_ROOT}/<package-id>/
 so repeated installs don't re-download (see --force-download). fdroid apps
 are cached by fdroidcl itself; local apps aren't cached (nothing to cache).
 
@@ -387,17 +406,48 @@ resolve_target_user() {
   fi
 }
 
+# Reads the config's top-level `profiles:` list (an array of {name, id},
+# e.g. so `profile: work` in an app entry can mean id 10) into
+# PROFILE_ALIASES. A config without a `profiles:` section just gets an
+# empty map, which is fine: effective_target_user falls back to using
+# CURRENT_PROFILE literally (a bare id, "all", or "current") in that case.
+load_profile_aliases() {
+  local config="$1"
+  PROFILE_ALIASES=()
+
+  local -a lines
+  mapfile -t lines < <(yq -r '(.profiles // [])[] | [.name, .id] | join("§")' "$config")
+
+  local line name id
+  for line in "${lines[@]}"
+  do
+    [[ -z "$line" ]] && continue
+    IFS='§' read -r name id <<< "$line"
+    [[ -n "$name" ]] && PROFILE_ALIASES["$name"]="$id"
+  done
+}
+
 # The --user value to actually pass to adb install/install-multiple: the
-# per-app CURRENT_PROFILE from config wins if set (a number, "all", or
-# "current" -- all valid adb/pm values, passed through as-is, unvalidated),
-# otherwise the auto-detected current profile (TARGET_USER, set once per
-# device in cmd_install). Never defaults to "all" on its own -- installing
-# to every profile has to be an explicit, per-app opt-in via `profile: all`
-# in the config, not something that happens by not configuring anything.
+# per-app CURRENT_PROFILE from config wins if set -- resolved through
+# PROFILE_ALIASES first (so `profile: work` becomes "10"), falling back to
+# using it literally if it's not an alias (a bare id like `profile: 10`
+# doesn't require a `profiles:` section at all, nor does "all"/"current").
+# If CURRENT_PROFILE is unset entirely, falls back to the auto-detected
+# current profile (TARGET_USER, set once per device in cmd_install). Never
+# defaults to "all" on its own -- installing to every profile has to be an
+# explicit, per-app opt-in via `profile: all` in the config, not something
+# that happens by not configuring anything.
 effective_target_user() {
-  if [[ -n "${CURRENT_PROFILE:-}" ]]
+  local profile="${CURRENT_PROFILE:-}"
+
+  if [[ -n "$profile" && -n "${PROFILE_ALIASES[$profile]:-}" ]]
   then
-    printf '%s\n' "$CURRENT_PROFILE"
+    profile="${PROFILE_ALIASES[$profile]}"
+  fi
+
+  if [[ -n "$profile" ]]
+  then
+    printf '%s\n' "$profile"
   else
     printf '%s\n' "${TARGET_USER:-}"
   fi
@@ -700,9 +750,56 @@ install_github() {
   adb -s "$DEVICE_SERIAL" install -r "${user_args[@]}" "${apks[0]}"
 }
 
+install_url() {
+  local cache_dir
+  cache_dir="$(cache_dir_for "$CURRENT_PKG")"
+
+  if [[ -z "$CURRENT_URL" ]]
+  then
+    log_error "$CURRENT_PKG uses store: url but has no 'url' set"
+    return 1
+  fi
+
+  if [[ -n "$FORCE_DOWNLOAD" ]] || ! has_apk_files "$cache_dir"
+  then
+    mkdir -p "$cache_dir"
+    rm -f "$cache_dir"/*.apk
+
+    local filename
+    filename="$(basename "$CURRENT_URL")"
+    [[ "$filename" == *.apk ]] || filename="${CURRENT_PKG}.apk"
+
+    log_step "Downloading $CURRENT_URL"
+    if ! curl --fail --silent --show-error --location --output "${cache_dir}/${filename}" "$CURRENT_URL"
+    then
+      log_error "Failed to download $CURRENT_URL"
+      return 1
+    fi
+  else
+    log_step "Using cached download in $cache_dir"
+  fi
+
+  local -a apks
+  mapfile -t apks < <(find "$cache_dir" -maxdepth 1 -iname '*.apk')
+
+  if [[ ${#apks[@]} -ne 1 ]]
+  then
+    log_error "Expected exactly one cached APK in $cache_dir, found ${#apks[@]}"
+    return 1
+  fi
+
+  # No -i: same reasoning as install_github (no real installed package to
+  # truthfully attribute this to).
+  local -a user_args=()
+  local user_val
+  user_val="$(effective_target_user)"
+  [[ -n "$user_val" ]] && user_args=(--user "$user_val")
+  adb -s "$DEVICE_SERIAL" install -r "${user_args[@]}" "${apks[0]}"
+}
+
 # Reads its per-app inputs from CURRENT_NAME/CURRENT_PKG/CURRENT_STORE/
-# CURRENT_REPO/CURRENT_ASSET/CURRENT_PATH/CURRENT_PROFILE (set by
-# for_each_app's read loop) and its run-wide context from
+# CURRENT_REPO/CURRENT_ASSET/CURRENT_PATH/CURRENT_PROFILE/CURRENT_URL (set
+# by for_each_app's read loop) and its run-wide context from
 # DEVICE_SERIAL/DRY_RUN/FORCE_DOWNLOAD/TARGET_USER (set by cmd_install
 # before calling for_each_app). See AGENTS.md for why -- this replaced a
 # positional-argument chain that kept growing every time a store needed one
@@ -737,8 +834,11 @@ install_app() {
     local)
       install_local || rc=$?
       ;;
+    url)
+      install_url || rc=$?
+      ;;
     *)
-      log_error "Unknown store '$CURRENT_STORE' for $CURRENT_PKG (expected gplay, fdroid, github, or local)"
+      log_error "Unknown store '$CURRENT_STORE' for $CURRENT_PKG (expected gplay, fdroid, github, local, or url)"
       rc=1
       ;;
   esac
@@ -777,14 +877,14 @@ uninstall_app() {
 }
 
 # Emits the configured apps as one row per app: name, pkg, store (defaulted),
-# repo, asset (defaulted), path, profile (defaulted) -- joined with U+00A7
-# (SECTION SIGN), not a tab. Several of these fields (repo/asset/path/
-# profile) are legitimately empty for most apps, and bash's `read` collapses
-# consecutive *whitespace* IFS delimiters (tab included) regardless of what
-# IFS is set to, silently dropping empty fields and shifting everything
-# after them left by one. Using a non-whitespace, extremely-unlikely-to-
-# appear-in-real-data separator sidesteps that entirely. Shared by
-# for_each_app and cmd_diff.
+# repo, asset (defaulted), path, profile (defaulted), url -- joined with
+# U+00A7 (SECTION SIGN), not a tab. Several of these fields (repo/asset/
+# path/profile/url) are legitimately empty for most apps, and bash's `read`
+# collapses consecutive *whitespace* IFS delimiters (tab included)
+# regardless of what IFS is set to, silently dropping empty fields and
+# shifting everything after them left by one. Using a non-whitespace,
+# extremely-unlikely-to-appear-in-real-data separator sidesteps that
+# entirely. Shared by for_each_app and cmd_diff.
 app_rows() {
   local config="$1"
 
@@ -792,18 +892,18 @@ app_rows() {
   yq -r '(.store // "gplay") as $ds |
     (.profile // "") as $dp |
     .apps[] |
-    [.name, .pkg, (.store // $ds), (.repo // ""), (.asset // "\\.apk$"), (.path // ""), (.profile // $dp)] | join("§")' "$config"
+    [.name, .pkg, (.store // $ds), (.repo // ""), (.asset // "\\.apk$"), (.path // ""), (.profile // $dp), (.url // "")] | join("§")' "$config"
 }
 
 # Calls app_fn (a zero-arg function; see install_app's comment) once per
 # configured app, with CURRENT_NAME/CURRENT_PKG/CURRENT_STORE/CURRENT_REPO/
-# CURRENT_ASSET/CURRENT_PATH/CURRENT_PROFILE set for it to read.
+# CURRENT_ASSET/CURRENT_PATH/CURRENT_PROFILE/CURRENT_URL set for it to read.
 for_each_app() {
   local config="$1"
   local app_fn="$2"
   local failures=0
 
-  while IFS='§' read -r CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE <&3
+  while IFS='§' read -r CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE CURRENT_URL <&3
   do
     if ! "$app_fn"
     then
@@ -827,6 +927,8 @@ cmd_install() {
   local DRY_RUN=""
   local FORCE_DOWNLOAD=""
   local bulk=""
+  local enforce=""
+  local assume_yes=""
 
   while [[ -n "${1:-}" ]]
   do
@@ -849,6 +951,14 @@ cmd_install() {
         ;;
       -f|--force-download)
         FORCE_DOWNLOAD=1
+        shift
+        ;;
+      --enforce)
+        enforce=1
+        shift
+        ;;
+      -y|--yes|--noconfirm|--no-confirm)
+        assume_yes=1
         shift
         ;;
       --bulk|--all-devices|--all)
@@ -880,6 +990,8 @@ cmd_install() {
   local -a devices
   mapfile -t devices <<< "$devices_raw"
 
+  load_profile_aliases "$config"
+
   local -a stores
   mapfile -t stores < <(config_stores "$config")
 
@@ -900,6 +1012,11 @@ cmd_install() {
     check_deps curl jq
   fi
 
+  if printf '%s\n' "${stores[@]}" | grep -qx url
+  then
+    check_deps curl
+  fi
+
   local DEVICE_SERIAL TARGET_USER overall_rc=0
   for DEVICE_SERIAL in "${devices[@]}"
   do
@@ -909,9 +1026,80 @@ cmd_install() {
     then
       overall_rc=1
     fi
+
+    if [[ -n "$enforce" ]] && ! enforce_config "$config" "$DEVICE_SERIAL" "$DRY_RUN" "$assume_yes"
+    then
+      overall_rc=1
+    fi
   done
 
   return "$overall_rc"
+}
+
+# `install --enforce`: uninstalls any device-installed, non-plumbing package
+# with no matching `pkg:` entry in the config (see list_extra_pkgs). Prompts
+# once for the whole batch on a given device, not once per package -- skip
+# the prompt with -y/--yes/--noconfirm/--no-confirm. Respects --dry-run:
+# prints what would be removed, uninstalls nothing.
+enforce_config() {
+  local config="$1"
+  local device="$2"
+  local dry_run="$3"
+  local assume_yes="$4"
+
+  local -a extra_pkgs
+  mapfile -t extra_pkgs < <(list_extra_pkgs "$config" "$device")
+
+  if [[ ${#extra_pkgs[@]} -eq 0 ]]
+  then
+    log_ok "No unconfigured apps found on $device"
+    return 0
+  fi
+
+  log_step "Found ${#extra_pkgs[@]} unconfigured app(s) on $device:"
+  local pkg
+  for pkg in "${extra_pkgs[@]}"
+  do
+    printf '  %s\n' "$pkg" >&2
+  done
+
+  if [[ -n "$dry_run" ]]
+  then
+    printf '  would uninstall %d app(s)\n' "${#extra_pkgs[@]}"
+    return 0
+  fi
+
+  if [[ -z "$assume_yes" ]]
+  then
+    local reply
+    read -rp "Uninstall these ${#extra_pkgs[@]} app(s) from $device? [y/N] " reply
+    case "$reply" in
+      y|Y|yes|YES)
+        ;;
+      *)
+        log_step "Skipping enforcement on $device"
+        return 0
+        ;;
+    esac
+  fi
+
+  local failures=0
+  for pkg in "${extra_pkgs[@]}"
+  do
+    log_step "Uninstalling $pkg"
+    if adb -s "$device" uninstall "$pkg"
+    then
+      log_ok "$pkg uninstalled"
+    else
+      log_error "$pkg failed to uninstall"
+      failures=$((failures + 1))
+    fi
+  done
+
+  if [[ $failures -gt 0 ]]
+  then
+    return 1
+  fi
 }
 
 cmd_uninstall() {
@@ -1143,11 +1331,49 @@ cmd_devices() {
   } | render_table
 }
 
+# Packages installed on the device (third-party, not GMS/AOSP plumbing --
+# see is_system_plumbing_pkg) that have no matching `pkg:` entry anywhere in
+# the config. Prints one package id per line; no output means nothing extra.
+# Shared by `diff --full` (surfaces them) and `install --enforce` (offers to
+# uninstall them). Deliberately a single `pm list packages -3` call with no
+# --user -- unlike generate-config, this isn't trying to be precise about
+# which profile an app lives in, just "is this pkg configured at all".
+list_extra_pkgs() {
+  local config="$1"
+  local device="$2"
+
+  local -a configured_pkgs
+  mapfile -t configured_pkgs < <(yq -r '.apps[].pkg' "$config")
+
+  local -A configured=()
+  local p
+  for p in "${configured_pkgs[@]}"
+  do
+    configured["$p"]=1
+  done
+
+  local -a lines
+  mapfile -t lines < <(adb -s "$device" shell pm list packages -3 </dev/null 2>/dev/null | tr -d '\r')
+
+  local line pkg
+  for line in "${lines[@]}"
+  do
+    [[ "$line" =~ ^package:([^[:space:]]+)$ ]] || continue
+    pkg="${BASH_REMATCH[1]}"
+
+    is_system_plumbing_pkg "$pkg" && continue
+    [[ -n "${configured[$pkg]:-}" ]] && continue
+
+    printf '%s\n' "$pkg"
+  done
+}
+
 cmd_diff() {
   local config="$DEFAULT_CONFIG"
   local cli_device=""
   local bulk=""
   local sort_by="name"
+  local full=""
 
   while [[ -n "${1:-}" ]]
   do
@@ -1171,6 +1397,10 @@ cmd_diff() {
       --sort-by)
         sort_by="$2"
         shift 2
+        ;;
+      --full)
+        full=1
+        shift
         ;;
       *)
         log_error "Unknown option: $1"
@@ -1207,7 +1437,7 @@ cmd_diff() {
   local -a devices
   mapfile -t devices <<< "$devices_raw"
 
-  local DEVICE_SERIAL CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE
+  local DEVICE_SERIAL CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE CURRENT_URL
   for DEVICE_SERIAL in "${devices[@]}"
   do
     log_step "Target device: $DEVICE_SERIAL"
@@ -1215,7 +1445,7 @@ cmd_diff() {
     {
       printf 'NAME\tPKG\tSTORE\tSTATUS\n'
       {
-        while IFS='§' read -r CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE <&3
+        while IFS='§' read -r CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE CURRENT_URL <&3
         do
           if is_installed "$DEVICE_SERIAL" "$CURRENT_PKG"
           then
@@ -1224,8 +1454,20 @@ cmd_diff() {
             printf '%s\t%s\t%s\tmissing\n' "$CURRENT_NAME" "$CURRENT_PKG" "$CURRENT_STORE"
           fi
         done 3< <(app_rows "$config")
+
+        if [[ -n "$full" ]]
+        then
+          local -a extra_pkgs
+          mapfile -t extra_pkgs < <(list_extra_pkgs "$config" "$DEVICE_SERIAL")
+
+          local extra_pkg
+          for extra_pkg in "${extra_pkgs[@]}"
+          do
+            printf '%s\t%s\t%s\textra\n' "$extra_pkg" "$extra_pkg" "?"
+          done
+        fi
       } | sort -t $'\t' -k"${sort_field},${sort_field}" -f
-    } | render_table | colorize_word installed "$C_GREEN" | colorize_word missing "$C_YELLOW"
+    } | render_table | colorize_word installed "$C_GREEN" | colorize_word missing "$C_YELLOW" | colorize_word extra "$C_RED"
   done
 }
 
@@ -1256,6 +1498,32 @@ store_for_installer() {
       ;;
     *)
       printf '\n'
+      ;;
+  esac
+}
+
+# Some well-known packages have one true, stable install source regardless
+# of how *this* device's copy actually got there -- installer attribution
+# can't tell us that (they're typically sideloaded, ending up installer=
+# packageinstaller/null just like any manually-installed APK). Used by
+# generate-config to emit a concrete, working entry for these specific
+# packages instead of the usual "store unknown"/empty-repo placeholder.
+# Emits store§url§repo§asset (unused fields for a given store are empty).
+known_pkg_override() {
+  case "$1" in
+    org.fdroid.fdroid)
+      printf 'url§https://f-droid.org/F-Droid.apk§§\n'
+      ;;
+    dev.imranr.obtainium.fdroid | dev.imranr.obtainium)
+      # jq/yq test() matches this as a substring of the filename, not
+      # required to match the whole thing, so this can't accidentally
+      # match e.g. app-arm64-v8a-release.apk -- verified against a real
+      # release (github.com/ImranR98/Obtainium, tag v1.6.10): matches
+      # exactly app-release.apk, nothing else, out of ~30 assets.
+      printf 'github§§ImranR98/Obtainium§app-release\\.apk$\n'
+      ;;
+    *)
+      return 1
       ;;
   esac
 }
@@ -1445,6 +1713,7 @@ cmd_generate_config() {
   # against all of them, not just assumed. Falls back to just "0" if this
   # can't be determined (no multi-user support, older Android).
   local -a profile_ids=()
+  local -a profile_names=()
   local -a user_lines
   mapfile -t user_lines < <(adb -s "$device" shell pm list users </dev/null 2>/dev/null | tr -d '\r')
   local uline
@@ -1456,6 +1725,45 @@ cmd_generate_config() {
 
   local current_profile
   current_profile="$(resolve_target_user "$device")"
+
+  # Give every profile a short alias name for the generated `profiles:`
+  # section: the auto-detected current one is always "main"; others get a
+  # slugified version of their actual name (from `pm list users`), falling
+  # back to "profileN" if that's empty, reserved, or a duplicate.
+  local -A used_alias_names=()
+  local pid pname raw_name slug
+  for pid in "${profile_ids[@]}"
+  do
+    if [[ "$pid" == "$current_profile" ]]
+    then
+      pname="main"
+    else
+      raw_name=""
+      for uline in "${user_lines[@]}"
+      do
+        if [[ "$uline" =~ UserInfo\{${pid}:([^:]*): ]]
+        then
+          raw_name="${BASH_REMATCH[1]}"
+          break
+        fi
+      done
+      slug="$(printf '%s' "${raw_name,,}" | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')"
+      if [[ -z "$slug" || "$slug" == "main" || "$slug" == "all" || "$slug" == "current" || -n "${used_alias_names[$slug]:-}" ]]
+      then
+        slug="profile${pid}"
+      fi
+      pname="$slug"
+    fi
+    used_alias_names["$pname"]=1
+    profile_names+=("$pname")
+  done
+
+  local -A id_to_name=()
+  local pidx
+  for pidx in "${!profile_ids[@]}"
+  do
+    id_to_name["${profile_ids[$pidx]}"]="${profile_names[$pidx]}"
+  done
 
   # Gather packages+installer per profile (one bulk `pm list packages` call
   # per profile, not per app) so each app's profile field can be set from
@@ -1529,24 +1837,45 @@ cmd_generate_config() {
     fi
     printf '# store is detected from the installer attribution (pm list packages -i):\n'
     printf '#   com.android.vending -> gplay, org.fdroid.fdroid -> fdroid, Obtainium -> github.\n'
+    printf '# A few well-known packages (the F-Droid and Obtainium clients themselves) get\n'
+    printf '# a concrete, working store/url or store/repo/asset regardless of installer,\n'
+    printf '# since their real source is always the same no matter how they got here.\n'
     printf '# The top-level default below covers the common case (gplay); only apps that\n'
     printf '# differ from it get their own store: line.\n'
-    printf '# profile is only set on apps that are not installed just for the current\n'
-    printf '# profile (%s): "all" if installed for every profile found (%s), or a specific\n' "${current_profile:-?}" "${profile_ids[*]}"
-    printf '# profile id if installed for exactly one other one.\n'
+    printf '# profiles: gives each detected Android user/profile a short name (the\n'
+    printf '# auto-detected current one is always "main"); apps get a profile: <name> only\n'
+    printf '# if installed somewhere other than just that current profile -- "all" if\n'
+    printf '# installed for every profile found, or a specific profile name if installed\n'
+    printf '# for exactly one other one. profile: also accepts a bare id or "all"/"current"\n'
+    printf '# directly, with no need for a profiles: entry to back it.\n'
     printf '# Entries marked with a "# TODO" are commented out: reinstalling from this\n'
     printf '# config as-is would fail for them (store could not be determined, or a\n'
     printf '# github repo/asset could not be recovered) -- fix them up and uncomment.\n'
     printf 'device: %s\n' "$device"
     printf 'store: gplay\n'
+    printf 'profiles:\n'
+    local pidx2
+    for pidx2 in "${!profile_ids[@]}"
+    do
+      printf '  - name: %s\n' "${profile_names[$pidx2]}"
+      printf '    id: %s\n' "${profile_ids[$pidx2]}"
+    done
     printf 'apps:\n'
 
-    local store name resolved todo profile_field
+    local store name resolved todo profile_field override store_url store_repo store_asset
     local -a entry_lines app_profiles
     for pkg in "${keep_pkgs[@]}"
     do
       installer="${pkg_installer[$pkg]}"
-      store="$(store_for_installer "$installer")"
+      store_url=""
+      store_repo=""
+      store_asset=""
+      if override="$(known_pkg_override "$pkg")"
+      then
+        IFS='§' read -r store store_url store_repo store_asset <<< "$override"
+      else
+        store="$(store_for_installer "$installer")"
+      fi
 
       name="$pkg"
       if [[ -n "$resolve_names" ]] && resolved="$(resolve_app_label "$device" "$pkg")" && [[ -n "$resolved" ]]
@@ -1570,15 +1899,24 @@ cmd_generate_config() {
         profile_field="all"
       elif [[ ${#app_profiles[@]} -eq 1 && "${app_profiles[0]}" != "$current_profile" ]]
       then
-        profile_field="${app_profiles[0]}"
+        profile_field="${id_to_name[${app_profiles[0]}]:-${app_profiles[0]}}"
       fi
 
       todo=""
       entry_lines=("  - name: $(yaml_quote_scalar "$name")" "    pkg: $pkg")
       case "$store" in
         github)
-          entry_lines+=("    store: github" '    repo: ""')
-          todo="installed via Obtainium -- set repo/asset by hand, original repo is unknown"
+          entry_lines+=("    store: github")
+          if [[ -n "$store_repo" ]]
+          then
+            entry_lines+=("    repo: $store_repo" "    asset: '$store_asset'")
+          else
+            entry_lines+=('    repo: ""')
+            todo="installed via Obtainium -- set repo/asset by hand, original repo is unknown"
+          fi
+          ;;
+        url)
+          entry_lines+=("    store: url" "    url: $store_url")
           ;;
         "")
           todo="store unknown (installer=${installer:-none}) -- set store by hand"

@@ -81,7 +81,9 @@ _declaroid() {
         install)
           _declaroid_common_args \
             '--dry-run[Print what would happen without downloading/installing]' \
-            '(-f --force-download)'{-f,--force-download}'[Re-download even if a cached copy exists]'
+            '(-f --force-download)'{-f,--force-download}'[Re-download even if a cached copy exists]' \
+            '--enforce[Also uninstall device apps that are not in the config]' \
+            '(-y --yes --noconfirm --no-confirm)'{-y,--yes,--noconfirm,--no-confirm}'[Skip the --enforce confirmation prompt]'
           ;;
         uninstall)
           _declaroid_common_args \
@@ -90,7 +92,8 @@ _declaroid() {
           ;;
         diff)
           _declaroid_common_args \
-            '--sort-by[Sort output]:key:(name pkg)'
+            '--sort-by[Sort output]:key:(name pkg)' \
+            '--full[Also list device apps that are not in the config]'
           ;;
         devices|list)
           _arguments \

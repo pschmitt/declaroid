@@ -157,6 +157,28 @@ incomplete change, not a follow-up.
   `sort -t $'\t' -k<N>,<N> -f` -- the header row (`printf` outside that
   inner pipe) must never enter the sort, or it'll end up sorted into the
   data instead of staying first. `-f` gives case-insensitive comparison.
+- **Never write `while read ... < <(process substitution)` anywhere in this
+  script -- always `mapfile -t arr < <(cmd)` followed by a plain `for` loop
+  instead.** `load_profile_aliases` used the `while read` form and worked
+  fine when run as the raw script under an interactive bash, but silently
+  killed the entire `install` command (no error, just exit 1) when run
+  through the packaged/wrapped nix binary -- traced by diffing four
+  combinations of {raw source, wrapped binary} x {interactive PATH, wrapped
+  PATH} until the failure was isolated to that exact construct under the
+  wrapped bash's execution context. The root cause was never fully pinned
+  down mechanistically, but the fix (switch to `mapfile` + `for`, as
+  `for_each_app`/`cmd_diff`/`list_extra_pkgs` already did) reliably resolved
+  it, and this class of bug -- like the `compgen` one above -- will not show
+  up in interactive-shell testing. Treat `while read <(...)` as banned in
+  this codebase, not just a style preference.
+- `list_extra_pkgs` (shared by `diff --full` and `install --enforce`) finds
+  device-installed, non-plumbing packages absent from the config via a
+  single `pm list packages -3` call with no `--user` -- it isn't trying to
+  be precise about *which* profile an app lives in like `generate-config`
+  is, just "is this pkg configured anywhere at all". `install --enforce`
+  prompts once per device for the whole batch of extra packages, not once
+  per package, mirroring `cmd_uninstall`'s existing confirmation pattern
+  (skippable with the same `-y|--yes|--noconfirm|--no-confirm`).
 
 ## Nix packaging
 
