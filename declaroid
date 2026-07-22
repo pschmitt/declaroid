@@ -40,24 +40,27 @@ else
   HYPERLINKS=''
 fi
 
+# Prefix style mirrors this author's echo_info/echo_success/echo_warning/
+# echo_error zsh helpers (see e.g. secrets/sops-init.sh in nixos-config):
+# bold + color + a bare label (no brackets), not padded to a common width.
 log_step() {
-  printf '%s==>%s %s\n' "${C_BOLD}${C_BLUE}" "$C_RESET" "$1" >&2
+  printf '%s%sINF%s %s\n' "$C_BOLD" "$C_BLUE" "$C_RESET" "$1" >&2
 }
 
 log_skip() {
-  printf '%s[skip]%s %s\n' "$C_YELLOW" "$C_RESET" "$1" >&2
+  printf '%s%sSKP%s %s\n' "$C_BOLD" "$C_YELLOW" "$C_RESET" "$1" >&2
 }
 
 log_ok() {
-  printf '%s[ok]%s %s\n' "$C_GREEN" "$C_RESET" "$1" >&2
+  printf '%s%sOK%s %s\n' "$C_BOLD" "$C_GREEN" "$C_RESET" "$1" >&2
 }
 
 log_warn() {
-  printf '%s[warn]%s %s\n' "$C_YELLOW" "$C_RESET" "$1" >&2
+  printf '%s%sWRN%s %s\n' "$C_BOLD" "$C_YELLOW" "$C_RESET" "$1" >&2
 }
 
 log_error() {
-  printf '%s[error]%s %s\n' "$C_RED" "$C_RESET" "$1" >&2
+  printf '%s%sERR%s %s\n' "$C_BOLD" "$C_RED" "$C_RESET" "$1" >&2
 }
 
 usage() {

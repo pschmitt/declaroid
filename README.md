@@ -48,15 +48,19 @@ apps:
 
 ```console
 $ declaroid install
-==> Target device: 10.5.0.110:43411
-[skip] DB Navigator (de.hafas.android.db) already installed
-==> Installing Google Maps (com.google.android.apps.maps) [gplay]
-[ok] Google Maps (com.google.android.apps.maps) installed
-==> Installing Aurora Store (com.aurora.store) [fdroid]
-[ok] Aurora Store (com.aurora.store) installed
-==> Installing Findroid Plus (dev.pschmitt.findroidplus) [github]
-[ok] Findroid Plus (dev.pschmitt.findroidplus) installed
-[ok] All apps processed successfully
+INF Target device: 10.5.0.110:43411
+Install plan for 10.5.0.110:43411: 3 app(s) to install (1 already installed)
+  Google Maps (com.google.android.apps.maps) [gplay]
+  Aurora Store (com.aurora.store) [fdroid]
+  Findroid Plus (dev.pschmitt.findroidplus) [github]
+Install these 3 app(s) on 10.5.0.110:43411? [y/N] y
+INF Installing Google Maps (com.google.android.apps.maps) [gplay]
+OK Google Maps (com.google.android.apps.maps) installed
+INF Installing Aurora Store (com.aurora.store) [fdroid]
+OK Aurora Store (com.aurora.store) installed
+INF Installing Findroid Plus (dev.pschmitt.findroidplus) [github]
+OK Findroid Plus (dev.pschmitt.findroidplus) installed
+OK All apps processed successfully
 ```
 
 See [`apps.yaml.example`](./apps.yaml.example) for a copy-pasteable starting
@@ -436,9 +440,9 @@ Go regexp `(?i)` flag.
 
 ```console
 $ declaroid add whatsapp --store gplay
-==> Searching Google Play for "whatsapp"
-==> Found: WhatsApp Messenger (com.whatsapp) [gplay]
-[ok] Added WhatsApp Messenger (com.whatsapp) to ~/.config/declaroid/apps.yaml
+INF Searching Google Play for "whatsapp"
+INF Found: WhatsApp Messenger (com.whatsapp) [gplay]
+OK Added WhatsApp Messenger (com.whatsapp) to ~/.config/declaroid/apps.yaml
 ```
 
 If exactly one match is found, it's added directly (no prompt). With more
@@ -451,7 +455,7 @@ The append itself is a structural `yq` edit (`.apps += [...]`), not a
 text-based insert -- verified against real, hand-commented, `generate-config`-produced files that it leaves every other byte of the file
 untouched (header comments, `profiles:`, commented-out `# TODO` entries all
 survive). If the picked package is already in the config, `add` skips it
-(`[skip] ... already in ...`) rather than adding a duplicate entry. The new
+(`SKP ... already in ...`) rather than adding a duplicate entry. The new
 entry's `store:` is only written out if it differs from the config's
 top-level default (same convention as `generate-config`).
 
