@@ -2635,6 +2635,35 @@ cmd_generate_config() {
       fi
     done
     wait
+
+    # Reorder keep_pkgs by resolved app name (not package id) so the
+    # generated config reads name-sorted, human-browsable order --
+    # resolve_app_label's on-disk cache was just warmed above, so this
+    # second pass is all cache hits (a plain `cat`), not re-downloading
+    # anything. Falls back to the package id per-entry exactly like the
+    # main loop below does, so the sort key always matches what actually
+    # ends up in each entry's `name:` field. Skipped when --no-labels/
+    # --fast is in effect: name always equals the package id then, and
+    # keep_pkgs is already pkg-sorted above, which is the same order.
+    local -a name_pkg_pairs
+    local sort_name resolved
+    for pkg in "${keep_pkgs[@]}"
+    do
+      sort_name="$pkg"
+      if resolved="$(resolve_app_label "$device" "$pkg")" && [[ -n "$resolved" ]]
+      then
+        sort_name="$resolved"
+      fi
+      name_pkg_pairs+=("$sort_name"$'\t'"$pkg")
+    done
+    # LC_ALL=C: under a UTF-8 locale's collation rules, GNU coreutils'
+    # `sort -f` can order "Firefox Nightly" before "Firefox" (confirmed
+    # against the packaged binary's bundled coreutils 9.11) -- a locale-
+    # collation quirk around how a trailing space is weighted, not
+    # something a case-insensitive ASCII sort should be at the mercy of.
+    # Forcing plain C/byte-order collation (still with -f for case-
+    # insensitivity) makes this deterministic everywhere.
+    mapfile -t keep_pkgs < <(printf '%s\n' "${name_pkg_pairs[@]}" | LC_ALL=C sort -f | cut -f2)
   fi
 
   local yaml

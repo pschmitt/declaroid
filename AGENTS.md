@@ -325,6 +325,19 @@ incomplete change, not a follow-up.
   the file path directly, sidestepping the quoting-nesting problem
   entirely since there's no shell re-parsing of the script's own content
   involved.
+- **`generate-config` writes apps sorted by resolved name, not package id**
+  -- `keep_pkgs` is initially pkg-sorted (needed early on so per-pkg work is
+  deterministic), then re-sorted by name in a second pass once names are
+  resolved (resolve_app_label's cache is already warm from the parallel
+  pass just before it, so this is cache-hit-cheap, not a second round of
+  `adb pull`+`aapt2`). **That second sort forces `LC_ALL=C`.** Confirmed
+  against the packaged binary's bundled coreutils 9.11: under a UTF-8
+  locale's collation, `sort -f` put "Firefox Nightly" *before* "Firefox" --
+  a real, reproducible collation quirk in how a trailing space is weighted
+  relative to no-more-characters, not a hypothetical. `sort -f` without
+  `LC_ALL=C` is used elsewhere in this script too (`--sort-by` in
+  `cmd_diff`/`cmd_devices`), inherited from before this was found -- same
+  quirk likely applies there, just not yet fixed.
 
 ## Nix packaging
 

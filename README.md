@@ -182,7 +182,11 @@ apps and adds up across a big app list, so:
   package ID as the name (also the automatic fallback if `aapt2` isn't
   installed)
 
-Rename whatever comes out wrong or unhelpful.
+Rename whatever comes out wrong or unhelpful. Apps are written out sorted by
+this resolved name, case-insensitively (falling back to the package ID, same
+as above, wherever a name couldn't be resolved) -- with `--no-labels`/
+`--fast`, that's the same as sorting by package ID, since that's what the
+name is in that case.
 
 `store` is guessed from each app's installer attribution
 (`pm list packages -i`):
