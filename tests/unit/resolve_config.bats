@@ -58,3 +58,25 @@ setup() {
   [ "$status" -eq 0 ]
   [ "$output" = "local" ]
 }
+
+@test "resolve_config: a device's own apps: entry replaces an imported one for the same pkg" {
+  # Regresses what would otherwise be a real bug: without dedup, apply
+  # would install this pkg (the imported, wanted row) and then immediately
+  # uninstall it again in the same run (the device's own state.installed:
+  # false row) -- forever, on every single apply.
+  run resolve_config "$(fixture resolve_config/dedup_device.yaml)"
+  [ "$status" -eq 0 ]
+  local resolved="$output"
+
+  run yq -r '.apps | length' "$resolved"
+  [ "$output" = "2" ]
+
+  run yq -r '.apps[] | select(.pkg == "com.example.override") | .name' "$resolved"
+  [ "$output" = "Not Wanted Here" ]
+
+  run yq -r '.apps[] | select(.pkg == "com.example.override") | .state.installed' "$resolved"
+  [ "$output" = "false" ]
+
+  run yq -r '.apps[] | select(.pkg == "com.example.keep") | .name' "$resolved"
+  [ "$output" = "Kept As-Is" ]
+}

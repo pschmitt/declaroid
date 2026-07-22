@@ -1,0 +1,6 @@
+apps:
+  - name: "Kept As-Is"
+    pkg: com.example.keep
+
+  - name: "Wanted (will be overridden)"
+    pkg: com.example.override

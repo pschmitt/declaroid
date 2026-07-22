@@ -1843,6 +1843,31 @@ resolve_config() {
   do
     merged_file="$(mktemp --suffix=.yaml)"
     yq eval-all "[(.$key // [])[]]" "${IMPORT_FILES[@]}" "$config" > "$merged_file"
+
+    if [[ "$key" == apps ]]
+    then
+      # Unlike modules:/profiles:/obtainium: (still plain concatenation,
+      # deliberately -- no request to change those yet), apps: entries
+      # dedup by pkg: the LAST entry for a given pkg wins outright,
+      # replacing every earlier one instead of just adding alongside it.
+      # This is what lets a device's own apps: entry actually override one
+      # pulled in from an import -- e.g. `state: {installed: false}` to
+      # opt out of a single app in an otherwise-shared imports/banking.yaml
+      # -- rather than producing two contradictory rows for the same pkg
+      # (which, before this, would install it in cmd_apply's install pass
+      # and then immediately uninstall it again in the same run's removal
+      # pass, every single time, since imports are pure concatenation and
+      # `app_rows` never deduped). `reverse | unique_by(.pkg) | reverse` is
+      # yq's own idiom for "unique, keeping the last occurrence" --
+      # `unique_by` alone keeps the *first* one, so reversing before and
+      # after flips that to last-wins while leaving the survivors in their
+      # original relative order (each ends up positioned where its last
+      # occurrence was -- confirmed via a real 4-entry test: import/
+      # import/import/own-override-of-the-2nd resolves to import/import/
+      # own-override, not own-override/import/import).
+      yq -i 'reverse | unique_by(.pkg) | reverse' "$merged_file"
+    fi
+
     DECLAROID_MERGED_FILE="$merged_file" yq -i ".$key = load(strenv(DECLAROID_MERGED_FILE))" "$resolved"
     rm -f "$merged_file"
   done
