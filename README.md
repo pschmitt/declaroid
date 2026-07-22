@@ -146,6 +146,7 @@ $ declaroid COMMAND [OPTIONS]
 | `-k, --dry-run, --dryrun` | all | Print what would happen instead of doing it (apply/uninstall/clear-cache: what would be installed/removed; `add`: the YAML entry instead of writing it; `download`: what would be downloaded; `generate-config` with `-o`: print instead of writing the file). No-op on commands that are already read-only (`devices`/`diff`/`modules`/`search`) |
 | `-f, --force-download` | apply, download | Re-download even if a cached copy exists (gplay only for `download` -- fdroid/izzyondroid cache on fdroidcl's own terms) |
 | `--enforce` | apply | Also uninstall device apps that aren't in the config (prompts once per device); same as config `enforce: true` |
+| `-g, --grant, --grant-permissions` | apply | Pass `-g` to `adb install`/`install-multiple`, granting every runtime permission at install time instead of prompting later (gplay/github/url/local only, no-op for fdroid/izzyondroid); same as config `grant_permissions: true` |
 | `--reboot` | apply | Reboot the target device(s) at the end if any module(s) were installed (no-op otherwise) |
 | `-y, --yes, --noconfirm, --no-confirm` | apply, apply --enforce, uninstall, clear-cache | Skip the confirmation prompt |
 | `-v, --verbose` | apply | Also log each already-installed app as it's skipped, instead of just a count in the plan |
@@ -271,11 +272,33 @@ listed order), then the file's own -- pure concatenation, not an override or
 a dedup by pkg/id, so listing the same app in both a shared file and the
 device file gives you two rows, not one. An import can itself have its
 own `imports:` (resolved recursively), and a cycle is detected and
-rejected rather than hanging. Every other top-level key (`device:`,
-`store:`, `enforce:`, `adb:`, `root:`, `profile:`) only ever comes from
-the file you actually pointed `--config`/`-c` at -- a shared fragment is
-just a library of apps/modules/obtainium repos, not a device template of
-its own.
+rejected rather than hanging.
+
+`enforce:`/`grant_permissions:` cascade in differently -- as a scalar
+override, not a concatenation: the importing file's own value wins if it
+sets the key at all, otherwise the last import in the list that sets it
+does. This is what lets a shared `imports/base.yaml` carry a default like
+`enforce: true` for every device that imports it, without repeating it in
+every device file:
+
+```yaml
+# imports/base.yaml
+enforce: true
+grant_permissions: true
+```
+
+```yaml
+# px5.yaml
+imports:
+  - imports/base.yaml
+# no enforce:/grant_permissions: of its own -- inherits both as true
+```
+
+Every other top-level key (`device:`, `store:`, `adb:`, `root:`,
+`profile:`) only ever comes from the file you actually pointed
+`--config`/`-c` at -- a shared fragment is just a library of
+apps/modules/obtainium repos (plus, optionally, `enforce:`/
+`grant_permissions:` defaults), not a device template of its own.
 
 This only applies to `apply`/`uninstall`/`diff`/`modules` -- `add` and
 `download` always read (and `add` writes) the file you point them at
@@ -782,6 +805,24 @@ enforce: true
 
 The CLI flag and the config key OR together -- either one is enough to turn
 it on for a given run.
+
+### `grant_permissions:` -- skip the runtime permission prompts
+
+By default, `adb install` leaves every dangerous runtime permission
+ungranted -- the app prompts for each one itself the first time it needs
+it. Passing `-g` (`adb install -g`/`install-multiple -g`) grants all of
+them upfront instead, at install time. `apply -g`/`--grant`/
+`--grant-permissions`, or the equivalent config key, turns this on:
+
+```yaml
+grant_permissions: true
+```
+
+Same OR semantics as `enforce:` above -- the CLI flag and the config key
+either one is enough. Only affects `gplay`/`github`/`url`/`local` installs
+(all of them go through a real `adb install`/`install-multiple`
+underneath); a no-op for `fdroid`/`izzyondroid`, since `fdroidcl install`
+has no equivalent flag at all.
 
 ### Per-app `state:` -- not desired, or disabled
 

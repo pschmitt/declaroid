@@ -114,6 +114,11 @@ ${C_BOLD}Options:${C_RESET}
                           fdroidcl's own terms, outside declaroid's control)
       ${C_YELLOW}--enforce${C_RESET}           (apply only) Also uninstall device apps that aren't in the config
                           (prompts once per device; see -y below)
+  ${C_YELLOW}-g, --grant, --grant-permissions${C_RESET}
+                          (apply only) Pass -g to adb install/install-multiple, granting
+                          every runtime permission at install time instead of prompting
+                          later (gplay/github/url/local only -- fdroidcl's own install has
+                          no equivalent, so this is a no-op for fdroid/izzyondroid)
       ${C_YELLOW}--reboot${C_RESET}            (apply only) Reboot the target device(s) at the end if any
                           module(s) were installed (no-op otherwise)
   ${C_YELLOW}-y, --yes, --noconfirm, --no-confirm${C_RESET}
@@ -177,9 +182,16 @@ ${C_BOLD}Config schema:${C_RESET}
                                                # recursively -- an import may itself have
                                                # imports:), then this file's own -- pure
                                                # concatenation, no override/dedup by pkg/id.
-                                               # Applies to apply/uninstall/diff/modules only --
-                                               # add/download always read and write the file
-                                               # as-is, ignoring imports:.
+                                               # enforce:/grant_permissions: cascade in from
+                                               # imports differently (override, not
+                                               # concatenation): this file's own value wins if
+                                               # set at all, else the last import that sets it
+                                               # does -- lets a shared imports/base.yaml carry
+                                               # a default for every device that imports it.
+                                               # Every other top-level key never cascades this
+                                               # way. Applies to apply/uninstall/diff/modules
+                                               # only -- add/download always read and write the
+                                               # file as-is, ignoring imports:.
     - <path, e.g. common-apps.yaml>
   device: <adb serial or substring query>   # optional, see device resolution above
   store: gplay|fdroid|izzyondroid|github|local|url  # optional top-level default, defaults to gplay
@@ -196,6 +208,10 @@ ${C_BOLD}Config schema:${C_RESET}
   enforce: true|false                         # optional, default false (apply only); equivalent
                                                # to always passing --enforce. The CLI flag and
                                                # this OR together.
+  grant_permissions: true|false               # optional, default false (apply only); equivalent
+                                               # to always passing -g/--grant-permissions. The
+                                               # CLI flag and this OR together. No effect on
+                                               # store: fdroid/izzyondroid apps (see -g above).
   profiles:                                   # optional, gives profile: short aliases
     - name: <alias, e.g. work>
       id: <user id, e.g. 10>
@@ -820,11 +836,14 @@ install_apk_files() {
   user_val="$(effective_target_user)"
   [[ -n "$user_val" ]] && user_args=(--user "$user_val")
 
+  local -a grant_args=()
+  [[ -n "${GRANT_PERMISSIONS:-}" ]] && grant_args=(-g)
+
   if [[ ${#keep_files[@]} -eq 1 && -n "$installer" ]]
   then
-    adb -s "$DEVICE_SERIAL" install -r "${user_args[@]}" -i "$installer" "${keep_files[0]}"
+    adb -s "$DEVICE_SERIAL" install -r "${user_args[@]}" "${grant_args[@]}" -i "$installer" "${keep_files[0]}"
   else
-    adb -s "$DEVICE_SERIAL" install-multiple -r "${user_args[@]}" "${keep_files[@]}"
+    adb -s "$DEVICE_SERIAL" install-multiple -r "${user_args[@]}" "${grant_args[@]}" "${keep_files[@]}"
   fi
 }
 
@@ -870,7 +889,10 @@ install_gplay() {
 # fdroid-sourced apps always end up with installer=null -- nothing declaroid
 # can do about that without patching fdroidcl itself. It does have its own
 # -user flag though (defaulting to the current user itself if omitted), so
-# profile targeting still works.
+# profile targeting still works. It has no -g/grant-permissions equivalent
+# at all (checked `fdroidcl install --help`) -- grant_permissions:/-g is a
+# no-op for store: fdroid/izzyondroid, documented as a known limitation
+# rather than silently ignored.
 install_fdroid() {
   local -a user_args=()
   local user_val
@@ -1139,7 +1161,9 @@ install_github() {
   local user_val
   user_val="$(effective_target_user)"
   [[ -n "$user_val" ]] && user_args=(--user "$user_val")
-  adb -s "$DEVICE_SERIAL" install -r "${user_args[@]}" "${apks[0]}"
+  local -a grant_args=()
+  [[ -n "${GRANT_PERMISSIONS:-}" ]] && grant_args=(-g)
+  adb -s "$DEVICE_SERIAL" install -r "${user_args[@]}" "${grant_args[@]}" "${apks[0]}"
 }
 
 install_url() {
@@ -1186,7 +1210,9 @@ install_url() {
   local user_val
   user_val="$(effective_target_user)"
   [[ -n "$user_val" ]] && user_args=(--user "$user_val")
-  adb -s "$DEVICE_SERIAL" install -r "${user_args[@]}" "${apks[0]}"
+  local -a grant_args=()
+  [[ -n "${GRANT_PERMISSIONS:-}" ]] && grant_args=(-g)
+  adb -s "$DEVICE_SERIAL" install -r "${user_args[@]}" "${grant_args[@]}" "${apks[0]}"
 }
 
 # Module zips are cached separately from app APKs, under their own
@@ -1728,9 +1754,12 @@ collect_imports() {
 # first, so a device-specific file's own list conceptually reads as "on
 # top of the shared ones", though this is pure concatenation, not an
 # override/dedup by pkg/id) into a throwaway temp copy, and prints *that*
-# path instead. Every other top-level key (device/store/enforce/adb/root/
-# profile) is copied verbatim from $config, untouched -- imports only
-# ever contribute to those four list-type sections. Every caller (cmd_apply/cmd_uninstall/
+# path instead. `enforce`/`grant_permissions` additionally cascade in from
+# imports as scalar overrides (config's own value wins if set at all,
+# else the last import that sets it) -- see the scalar_key loop below.
+# Every other top-level key (device/store/adb/root/profile) is copied
+# verbatim from $config, untouched -- imports never contribute to those.
+# Every caller (cmd_apply/cmd_uninstall/
 # cmd_diff/cmd_modules) reassigns its own local `config` to this function's
 # output right after its own config-file-exists check, so every existing
 # `yq`/app_rows/module_rows/list_extra_pkgs/etc call site downstream keeps
@@ -1772,6 +1801,32 @@ resolve_config() {
     yq eval-all "[(.$key // [])[]]" "${IMPORT_FILES[@]}" "$config" > "$merged_file"
     DECLAROID_MERGED_FILE="$merged_file" yq -i ".$key = load(strenv(DECLAROID_MERGED_FILE))" "$resolved"
     rm -f "$merged_file"
+  done
+
+  # A handful of scalar top-level settings use override semantics instead
+  # (a device config's own value always wins if it sets the key at all;
+  # otherwise the last import in the list that sets it wins) -- this is
+  # what lets a shared imports/base.yaml carry defaults like `enforce:
+  # true` for every device that imports it, without every device file
+  # having to repeat it. Deliberately only these two keys, not
+  # device/store/adb/root/profile -- those stay squarely a per-device
+  # concern, never cascaded from an import.
+  local scalar_key has_own has_import chosen_file imp_val imp
+  for scalar_key in enforce grant_permissions
+  do
+    has_own="$(yq -r "has(\"$scalar_key\")" "$config")"
+    [[ "$has_own" == true ]] && continue
+
+    chosen_file=""
+    for imp in "${IMPORT_FILES[@]}"
+    do
+      has_import="$(yq -r "has(\"$scalar_key\")" "$imp")"
+      [[ "$has_import" == true ]] && chosen_file="$imp"
+    done
+    [[ -z "$chosen_file" ]] && continue
+
+    imp_val="$(yq -r ".$scalar_key" "$chosen_file")"
+    yq -i ".$scalar_key = $imp_val" "$resolved"
   done
 
   printf '%s\n' "$resolved"
@@ -1946,6 +2001,7 @@ cmd_apply() {
   local VERBOSE=""
   local bulk=""
   local enforce=""
+  local GRANT_PERMISSIONS=""
   local do_reboot=""
   local assume_yes=""
   local cli_root_framework=""
@@ -1975,6 +2031,10 @@ cmd_apply() {
         ;;
       --enforce)
         enforce=1
+        shift
+        ;;
+      -g|--grant|--grant-permissions)
+        GRANT_PERMISSIONS=1
         shift
         ;;
       --reboot)
@@ -2051,6 +2111,19 @@ cmd_apply() {
     local config_enforce
     config_enforce="$(yq -r '.enforce == true' "$config")"
     [[ "$config_enforce" == true ]] && enforce=1
+  fi
+
+  # Same OR pattern as enforce above. GRANT_PERMISSIONS itself is read by
+  # install_apk_files/install_splits, several calls down through
+  # for_each_app/install_app -- a `local` here, dynamic-scope visible to
+  # everything cmd_apply calls (same convention as DRY_RUN/TARGET_USER,
+  # see AGENTS.md), to append `-g` to the actual `adb install`/
+  # `install-multiple` invocation.
+  if [[ -z "$GRANT_PERMISSIONS" ]]
+  then
+    local config_grant_permissions
+    config_grant_permissions="$(yq -r '.grant_permissions == true' "$config")"
+    [[ "$config_grant_permissions" == true ]] && GRANT_PERMISSIONS=1
   fi
 
   local devices_raw

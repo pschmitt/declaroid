@@ -141,6 +141,21 @@ incomplete change, not a follow-up.
   explicit `--user` and rely on the adb/pm default again without re-testing
   against a real multi-profile device -- the "obvious" fallback behavior
   demonstrably isn't there.
+- **`grant_permissions:`/`-g` follows the exact same dynamic-scope pattern as
+  `DRY_RUN`/`FORCE_DOWNLOAD`/`VERBOSE`, not `enforce`'s** -- it's declared
+  `local GRANT_PERMISSIONS=""` in `cmd_apply` itself (uppercase, the flag
+  variable *is* the value, no separate lowercase mirror var), so it stays
+  visible, dynamically scoped, all the way down through
+  `for_each_app`/`install_app` to `install_apk_files`/`install_github`/
+  `install_url` without being threaded through as a parameter anywhere.
+  Appended to `adb install`/`install-multiple` as its own `grant_args=()`
+  array (`[[ -n "${GRANT_PERMISSIONS:-}" ]] && grant_args=(-g)`), spliced
+  in right next to the existing `user_args` array at each of those three
+  call sites -- `install_local` needs no separate handling, it already
+  routes through `install_apk_files`. `fdroidcl install --help` (checked
+  directly) has no `-g`-equivalent flag at all, so `install_fdroid`/
+  `install_izzyondroid` are untouched -- documented as a real, permanent
+  no-op for `store: fdroid`/`izzyondroid`, not an oversight.
 - `profile: all` (or a specific id) in the config takes priority over the
   auto-detected current profile (see `effective_target_user`) -- but the
   *unset* case must keep resolving to the single auto-detected profile, not
@@ -421,6 +436,22 @@ incomplete change, not a follow-up.
   fixing it would mean either resolving twice (once merged for the check,
   once raw for the write) or threading a second config value through
   `cmd_add`/`add_app_to_config`, and it hasn't been worth it yet.
+- **`enforce:`/`grant_permissions:` cascade in from imports too, but as a
+  scalar override, not the list-key concatenation above** -- added so a
+  shared `imports/base.yaml` can carry `enforce: true` (and now
+  `grant_permissions: true`) for every device config that imports it,
+  without each one repeating it. `resolve_config`'s second loop (`for
+  scalar_key in enforce grant_permissions`) checks `yq 'has("$key")'`
+  against the *original* `$config` first -- if it's set there at all
+  (even to `false`), that wins outright and no import is consulted; only
+  an absent key falls through to the last import (in listed order) that
+  has it. Deliberately only these two keys -- `device:`/`store:`/`adb:`/
+  `root:`/`profile:` stay squarely per-device, never cascaded. Verified
+  via `bash -x` against a real device: a config importing a `base.yaml`
+  with both keys set to `true`, itself setting neither, correctly ended
+  up with `enforce=1`/`GRANT_PERMISSIONS=1` in the trace, and a real
+  `apply --dry-run` against it genuinely ran `enforce_config` (listed
+  every installed-but-unconfigured app, exactly `--enforce`'s behavior).
 - **`yq eval-all '[(.$key // [])[]]' file1 file2 ...' -- confirmed as the
   working idiom for "concatenate this one array key across N files, in
   file order."** Verified empirically (a 3-file test, `.apps` from each,

@@ -12,6 +12,12 @@
 #   - common-apps.yaml
 #   - common-modules.yaml
 
+# enforce:/grant_permissions: (see below) cascade in from imports as an
+# override instead -- this file's own value wins if it sets the key at
+# all, else the last import that sets it does. Lets a shared
+# imports/base.yaml carry a default for every device config that imports
+# it, without repeating it everywhere.
+
 # Optional. Matched as a case-insensitive substring against each connected
 # device's serial, USB path, product, model, and codename. Can be overridden
 # with --device or $TARGET_DEVICE. Omit entirely to be prompted interactively
@@ -44,6 +50,11 @@ store: gplay
 # Optional, default false (apply only). Same as always passing --enforce:
 # also uninstalls any device app that isn't in this config at all.
 # enforce: true
+
+# Optional, default false (apply only). Same as always passing
+# -g/--grant-permissions: grants every runtime permission at install time
+# instead of prompting later. No effect on store: fdroid/izzyondroid apps.
+# grant_permissions: true
 
 apps:
   - name: DB Navigator
