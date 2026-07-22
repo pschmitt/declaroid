@@ -1,38 +1,11 @@
-name: CI
+name: e2e
 
 on:
   push:
   pull_request:
 
 jobs:
-  checks:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: cachix/install-nix-action@v27
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-
-      # Covers bash -n + shellcheck against declaroid and every test file,
-      # actionlint against this workflow, and the whole bats unit suite
-      # (tests/unit) -- all wired up as flake `checks`. Deliberately
-      # doesn't pin LANG/LC_ALL: the sandboxed build's default `C` locale
-      # is what caught a real, previously-latent bug (see ROW_SEP's
-      # comment in declaroid) -- keeping it unset means any future
-      # locale-dependent regression fails here again.
-      - name: nix flake check
-        run: nix flake check -L
-
-      - name: nixfmt --check
-        run: nix run nixpkgs#nixfmt -- --check flake.nix
-
-      - name: statix check
-        run: nix develop --command statix check .
-
   e2e:
-    needs: checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -63,7 +63,7 @@
               '';
 
           actionlint = pkgs.runCommand "declaroid-actionlint" { nativeBuildInputs = [ pkgs.actionlint ]; } ''
-            actionlint ${./.github/workflows/ci.yml}
+            actionlint ${./.github/workflows}/*.yml
             touch "$out"
           '';
 

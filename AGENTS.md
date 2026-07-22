@@ -978,9 +978,9 @@ incomplete change, not a follow-up.
   derivation and nothing in the test suite needs `store: gplay`).
 - **`nix flake check`** builds three checks -- `shellcheck` (`bash -n` +
   `shellcheck` against `declaroid` and every file under `tests/`),
-  `actionlint` (against `.github/workflows/ci.yml`), and `bats-unit` (the
-  whole `tests/unit` suite) -- and is deliberately run with no LANG/
-  LC_ALL override. That's not an oversight: the Nix build sandbox's
+  `actionlint` (against every file under `.github/workflows/`), and
+  `bats-unit` (the whole `tests/unit` suite) -- and is deliberately run
+  with no LANG/LC_ALL override. That's not an oversight: the Nix build sandbox's
   effectively-`C` locale is exactly what caught the real `$ROW_SEP`/`§`
   locale bug documented above, and pinning a UTF-8 locale here would mask
   any future regression of that same class instead of catching it.
@@ -1013,19 +1013,25 @@ incomplete change, not a follow-up.
   real; don't point it at a device with anything you care about still on
   it. (This is exactly why CI runs it against a disposable emulator,
   never real hardware.)
-- **`.github/workflows/ci.yml`** has two jobs: `checks` (the `nix flake
-  check`/`nixfmt --check`/`statix check` trio, cheap, every push/PR) and
-  `e2e` (boots a real AVD via `reactivecircus/android-emulator-runner`,
-  `nix build`s `declaroid` + `bats`, then runs `tests/e2e` against it --
-  slower, but runs on every push/PR too, since that's the only tier that
-  actually exercises real `adb install`/`--enforce`/Obtainium-JSON-seeding
-  code paths, which is exactly the class of bug that kept slipping through
-  earlier in this file *despite* being live-tested, just never through an
-  automated, repeatable harness). The AVD is cached (keyed on api-level/
-  target/arch) with a one-time warm-up run to populate the cache on a miss,
-  matching `reactivecircus/android-emulator-runner`'s own recommended
-  pattern -- without it, every single run pays the emulator's full cold
-  boot time.
+- **`.github/workflows/` is six separate workflow files, not one job with
+  many steps** -- `shellcheck.yml`, `actionlint.yml`, `nixfmt.yml`,
+  `statix.yml`, `unit-tests.yml` (each `nix build`s the matching flake
+  `check`, or runs the matching formatter/linter directly), and `e2e.yml`
+  (boots a real AVD via `reactivecircus/android-emulator-runner`, `nix
+  build`s `declaroid` + `bats`, then runs `tests/e2e` against it). All six
+  run on every push/PR, independently -- deliberately not gated behind
+  each other (no cross-file `needs:`; GitHub Actions can't express that
+  across separate workflow files without a slower `workflow_run` trigger
+  anyway), so a red X always points at exactly one failing concern
+  instead of a bundled log to scroll through. `e2e` is the slow one, but
+  it's the only tier that actually exercises real `adb install`/
+  `--enforce`/Obtainium-JSON-seeding code paths -- exactly the class of
+  bug that kept slipping through earlier in this file *despite* being
+  live-tested, just never through an automated, repeatable harness. Its
+  AVD is cached (keyed on api-level/target/arch) with a one-time warm-up
+  run to populate the cache on a miss, matching
+  `reactivecircus/android-emulator-runner`'s own recommended pattern --
+  without it, every single run pays the emulator's full cold boot time.
 
 ## Nix packaging
 

@@ -960,7 +960,7 @@ $ statix check .
   real device or emulator: installs an app, `--enforce`-removes an
   unconfigured one, seeds an Obtainium repo, then uninstalls. CI runs this
   against a disposable emulator (see
-  [`.github/workflows/ci.yml`](./.github/workflows/ci.yml)). To run it
+  [`.github/workflows/e2e.yml`](./.github/workflows/e2e.yml)). To run it
   locally against a real connected device -- **this genuinely
   installs/uninstalls apps and enforces the test config, so only point it
   at a device you don't mind being modified**:
