@@ -45,14 +45,14 @@ incomplete change, not a follow-up.
   logic, not just `--dry-run` -- `--dry-run` does not exercise the actual
   download/cache/install code paths and has previously let bugs through.
   Specifically: `--dry-run` never exposed either of the two bugs below --
-  both only showed up on a real `install`.
+  both only showed up on a real `apply`.
 - **Per-app data flows through `CURRENT_NAME`/`CURRENT_PKG`/`CURRENT_STORE`/
   `CURRENT_REPO`/`CURRENT_ASSET`/`CURRENT_PATH`, not positional arguments.**
   `for_each_app` sets these (via a plain, non-`local` `read`, so they're
   visible to whatever it calls) before invoking `app_fn`; `install_app`,
   `uninstall_app`, and the per-store `install_*` functions are all
   effectively zero-arg and just read these plus `DEVICE_SERIAL`/`DRY_RUN`/
-  `FORCE_DOWNLOAD` (set once per device/run by `cmd_install`/`cmd_uninstall`).
+  `FORCE_DOWNLOAD` (set once per device/run by `cmd_apply`/`cmd_uninstall`).
   This replaced a positional chain that had grown to 8-9 params and was
   getting worse with every store added -- don't bring positional args back
   for this data; add a new `CURRENT_*` variable instead. Values that are
@@ -89,13 +89,13 @@ incomplete change, not a follow-up.
   someone's `generate-config` output, add its exact package ID to the case
   statement; don't switch to a path- or prefix-based heuristic without
   re-verifying against real device output first.
-- **`generate-config` entries that would fail a real `install` are written
+- **`generate-config` entries that would fail a real `apply` are written
   out commented out, with a `# TODO: <reason>` line above them** -- not
   emitted active with `store` silently defaulted to `gplay`. Concretely:
   unknown-store entries (no way to tell `local`/`fdroid`/`github` apart) and
   `github` entries with an empty `repo: ""` placeholder (Obtainium doesn't
   expose the source repo). The point is that feeding a freshly generated
-  config straight into `install` should never itself produce errors; if you
+  config straight into `apply` should never itself produce errors; if you
   add a new "we don't actually have enough info" case, comment it out the
   same way rather than emitting a guess.
 - **`adb install -i <id>`'s installer attribution only sticks if `<id>` is a
@@ -168,7 +168,7 @@ incomplete change, not a follow-up.
   script -- always `mapfile -t arr < <(cmd)` followed by a plain `for` loop
   instead.** `load_profile_aliases` used the `while read` form and worked
   fine when run as the raw script under an interactive bash, but silently
-  killed the entire `install` command (no error, just exit 1) when run
+  killed the entire `apply` command (no error, just exit 1) when run
   through the packaged/wrapped nix binary -- traced by diffing four
   combinations of {raw source, wrapped binary} x {interactive PATH, wrapped
   PATH} until the failure was isolated to that exact construct under the
@@ -178,25 +178,25 @@ incomplete change, not a follow-up.
   it, and this class of bug -- like the `compgen` one above -- will not show
   up in interactive-shell testing. Treat `while read <(...)` as banned in
   this codebase, not just a style preference.
-- `list_extra_pkgs` (shared by `diff --full` and `install --enforce`) finds
+- `list_extra_pkgs` (shared by `diff --full` and `apply --enforce`) finds
   device-installed, non-plumbing packages absent from the config via a
   single `pm list packages -3` call with no `--user` -- it isn't trying to
   be precise about *which* profile an app lives in like `generate-config`
-  is, just "is this pkg configured anywhere at all". `install --enforce`
+  is, just "is this pkg configured anywhere at all". `apply --enforce`
   prompts once per device for the whole batch of extra packages, not once
   per package, mirroring `cmd_uninstall`'s existing confirmation pattern
   (skippable with the same `-y|--yes|--noconfirm|--no-confirm`).
-- `install` builds a plan before touching anything: `build_install_plan`
+- `apply` builds a plan before touching anything: `build_install_plan`
   does a read-only pass (`is_installed` per configured app, no logging) to
   find what's actually missing on the device, `print_install_plan` shows
-  that (pending apps plus a count of already-installed ones) and `cmd_install`
+  that (pending apps plus a count of already-installed ones) and `cmd_apply`
   prompts per device before calling the *existing* `for_each_app "$config"
   install_app` unchanged -- the plan doesn't feed installs directly, it's
   purely a preview/confirm gate in front of the same install path as before.
   `install_app` still re-checks `is_installed` itself during the real pass
   (a second, cheap `pm list packages` call, not worth avoiding); its
   already-installed skip message is now gated on a new `VERBOSE` local
-  (`-v|--verbose`, set in `cmd_install` alongside `DRY_RUN`/`FORCE_DOWNLOAD`
+  (`-v|--verbose`, set in `cmd_apply` alongside `DRY_RUN`/`FORCE_DOWNLOAD`
   and read the same dynamically-scoped way) so it's silent by default --
   the plan's count already covers that case, no need for per-app spam too.
   `build_install_plan` uses `mapfile` + `for`, not `while read < <(...)`, per
@@ -421,11 +421,11 @@ incomplete change, not a follow-up.
   entries above): jq/yq's `//` cannot distinguish "present but falsy"
   from "absent," so never reach for it when that distinction matters.
 - `cmd_modules` stays read-only (drift reporting only, same shape as
-  `cmd_diff`) -- but `install` *does* install missing modules now (see
+  `cmd_diff`) -- but `apply` *does* install missing modules now (see
   below). Still deliberately no enable/disable/uninstall support: module
-  state changes only take effect on next boot for both frameworks (no
-  reboot orchestration exists in this codebase -- a `WRN ... reboot
-  required` reminder is printed instead), and APatch's own CLI `module
+  state changes only take effect on next boot for both frameworks (`apply`
+  never reboots on its own unless `--reboot` is given -- a `WRN ... reboot
+  required` reminder is printed instead otherwise), and APatch's own CLI `module
   install` has a documented failure mode
   ([bmax121/APatch#633](https://github.com/bmax121/APatch/issues/633))
   that its GUI app doesn't hit, with no known root cause -- untested here

@@ -67,12 +67,12 @@ usage() {
   cat <<EOF
 ${C_BOLD}Usage:${C_RESET} ${C_GREEN}declaroid${C_RESET} COMMAND [OPTIONS]
 
-Declarative Android app provisioning: define apps in YAML, install/uninstall
+Declarative Android app provisioning: define apps in YAML, apply/uninstall
 them onto a device via adb, fetching from Google Play (gplaydl), F-Droid or
 IzzyOnDroid (fdroidcl), a GitHub repo's release assets, or a local APK file.
 
 ${C_BOLD}Commands:${C_RESET}
-  ${C_CYAN}install${C_RESET}     Download (if not already cached) and install configured apps
+  ${C_CYAN}apply${C_RESET}       Download (if not already cached) and install configured apps
               and root modules (APatch/Magisk); shows a plan of what's
               actually pending first, then prompts for confirmation
               (see -y and -v below)
@@ -82,7 +82,7 @@ ${C_BOLD}Commands:${C_RESET}
   ${C_CYAN}modules${C_RESET}     Show configured root modules (APatch APModules/Magisk modules)
               vs what's actually on the device, read-only, no changes made
               (--full also lists device modules that aren't in the config;
-              use "install" to actually install a missing one)
+              use "apply" to actually install a missing one)
   ${C_CYAN}search${C_RESET} QUERY
               Search Google Play and/or F-Droid, print a colored table with
               clickable (OSC 8) links, no device or config needed
@@ -116,7 +116,7 @@ ${C_BOLD}Options:${C_RESET}
       ${C_YELLOW}--full${C_RESET}              (diff, modules) Also list device apps/modules that aren't in the
                           config, as "extra"
       ${C_YELLOW}--root-framework apatch|magisk${C_RESET}
-                          (install, modules, generate-config) Force which root framework to
+                          (apply, modules, generate-config) Force which root framework to
                           use instead of the config's root.framework/auto-detection
       ${C_YELLOW}--store gplay|fdroid|izzyondroid|any${C_RESET}
                           (search, add) Which store(s) to search (default: any;
@@ -213,7 +213,7 @@ izzyondroid apps are cached by fdroidcl itself; local apps aren't cached
 (nothing to cache). Module zips (source: github/url) are cached the same
 way, under ${CACHE_ROOT}/modules/<module-id>/.
 
-\`install\` also installs any configured modules that aren't already
+\`apply\` also installs any configured modules that aren't already
 present (github/url/local, same as apps), after a plan+confirm step just
 like apps get. \`modules\` itself stays read-only (drift reporting only).
 Neither ever enables/disables/uninstalls a module, and module state
@@ -522,7 +522,7 @@ load_profile_aliases() {
 # using it literally if it's not an alias (a bare id like `profile: 10`
 # doesn't require a `profiles:` section at all, nor does "all"/"current").
 # If CURRENT_PROFILE is unset entirely, falls back to the auto-detected
-# current profile (TARGET_USER, set once per device in cmd_install). Never
+# current profile (TARGET_USER, set once per device in cmd_apply). Never
 # defaults to "all" on its own -- installing to every profile has to be an
 # explicit, per-app opt-in via `profile: all` in the config, not something
 # that happens by not configuring anything.
@@ -1192,9 +1192,9 @@ install_module_zip() {
 # Reads its per-module inputs from CURRENT_MODULE_* (set by
 # for_each_module's read loop) and its run-wide context from
 # DEVICE_SERIAL/DRY_RUN/FORCE_DOWNLOAD/ROOT_FRAMEWORK/VERBOSE (set once per
-# device by cmd_install before calling for_each_module) -- same convention
+# device by cmd_apply before calling for_each_module) -- same convention
 # as install_app. Increments the run-wide MODULES_INSTALLED_COUNT on a
-# genuinely new install (not on skip), so cmd_install can print a single
+# genuinely new install (not on skip), so cmd_apply can print a single
 # "reboot required" reminder at the end instead of one per module.
 install_module_app() {
   local rc=0
@@ -1467,7 +1467,7 @@ print_install_plan() {
   } >&2
 }
 
-cmd_install() {
+cmd_apply() {
   local config="$DEFAULT_CONFIG"
   local cli_device=""
   local DRY_RUN=""
@@ -2619,7 +2619,7 @@ cmd_devices() {
 # Packages installed on the device (third-party, not GMS/AOSP plumbing --
 # see is_system_plumbing_pkg) that have no matching `pkg:` entry anywhere in
 # the config. Prints one package id per line; no output means nothing extra.
-# Shared by `diff --full` (surfaces them) and `install --enforce` (offers to
+# Shared by `diff --full` (surfaces them) and `apply --enforce` (offers to
 # uninstall them). Deliberately a single `pm list packages -3` call with no
 # --user -- unlike generate-config, this isn't trying to be precise about
 # which profile an app lives in, just "is this pkg configured at all".
@@ -3706,8 +3706,8 @@ main() {
       usage
       return 0
       ;;
-    install)
-      cmd_install "$@"
+    apply)
+      cmd_apply "$@"
       ;;
     uninstall)
       cmd_uninstall "$@"

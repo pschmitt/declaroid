@@ -54,7 +54,7 @@ _declaroid_common_args() {
 _declaroid_commands() {
   local -a commands
   commands=(
-    'install:Download (if needed) and install configured apps'
+    'apply:Download (if needed) and install configured apps'
     'uninstall:Uninstall configured apps (no download)'
     'diff:Show installed vs missing apps, no changes made'
     'modules:Show configured vs installed root modules (APatch/Magisk), no changes made'
@@ -81,18 +81,17 @@ _declaroid() {
   case "$state" in
     args)
       case "${line[1]}" in
-        install)
+        apply)
           _declaroid_common_args \
-            '--dry-run[Print what would happen without downloading/installing]' \
             '(-f --force-download)'{-f,--force-download}'[Re-download even if a cached copy exists]' \
             '--enforce[Also uninstall device apps that are not in the config]' \
-            '(-y --yes --noconfirm --no-confirm)'{-y,--yes,--noconfirm,--no-confirm}'[Skip the install/--enforce confirmation prompts]' \
+            '--reboot[Reboot the target device(s) at the end if any module(s) were installed]' \
+            '(-y --yes --noconfirm --no-confirm)'{-y,--yes,--noconfirm,--no-confirm}'[Skip the apply/--enforce confirmation prompts]' \
             '(-v --verbose)'{-v,--verbose}'[Log each already-installed app skipped, not just a count]' \
             '--root-framework[Force which root framework to use]:framework:(apatch magisk)'
           ;;
         uninstall)
           _declaroid_common_args \
-            '--dry-run[Print what would happen without uninstalling]' \
             '(-y --yes --noconfirm --no-confirm)'{-y,--yes,--noconfirm,--no-confirm}'[Skip the confirmation prompt]'
           ;;
         diff)

@@ -1,7 +1,7 @@
 # declaroid
 
 Declarative Android app provisioning. Define the apps you want on a device in
-a YAML file, then `declaroid install` fetches and installs them, `declaroid
+a YAML file, then `declaroid apply` fetches and installs them, `declaroid
 uninstall` removes them, and already-installed apps are skipped automatically.
 
 Apps can come from five sources:
@@ -19,7 +19,7 @@ Apps can come from five sources:
 
 Re-flashing or re-provisioning an Android device (a spare phone, a tablet, a
 test device) shouldn't mean manually hunting down APKs and clicking through
-installs one by one. Declare what you want once, run `declaroid install`.
+installs one by one. Declare what you want once, run `declaroid apply`.
 
 ## Example
 
@@ -47,7 +47,7 @@ apps:
 ```
 
 ```console
-$ declaroid install
+$ declaroid apply
 INF Target device: 10.5.0.110:43411
 Install plan for 10.5.0.110:43411: 3 app(s) to install (1 already installed)
   Google Maps (com.google.android.apps.maps) [gplay]
@@ -71,7 +71,7 @@ point.
 ### Nix flake
 
 ```console
-$ nix run github:pschmitt/declaroid -- install
+$ nix run github:pschmitt/declaroid -- apply
 ```
 
 Or add it as a flake input and use `packages.<system>.declaroid` /
@@ -126,10 +126,10 @@ $ declaroid COMMAND [OPTIONS]
 
 | Command | Description |
 |---|---|
-| `install` | Download (if not already cached) and install configured apps and root modules (shows a plan, prompts to confirm) |
+| `apply` | Download (if not already cached) and install configured apps and root modules (shows a plan, prompts to confirm) |
 | `uninstall` | Uninstall configured apps (no download) |
 | `diff` | Show which configured apps are installed vs missing, no changes made (`--full`: also list device apps not in the config) |
-| `modules` | Show configured root modules (APatch/Magisk) vs what's on the device, read-only (`--full`: also list device modules not in the config; `install` actually installs a missing one) |
+| `modules` | Show configured root modules (APatch/Magisk) vs what's on the device, read-only (`--full`: also list device modules not in the config; `apply` actually installs a missing one) |
 | `search QUERY` | Search Google Play and/or F-Droid; no device or config needed |
 | `add QUERY` | Search, then append the picked app to the config (fzf picker if more than one match) |
 | `devices`, `list` | List connected adb devices (serial, model, codename, connection) |
@@ -306,7 +306,7 @@ Tricky Store                  tricky_store      v1.4.1           yes      instal
 `--full` also lists installed-but-unconfigured modules as `extra`, same as
 `diff --full` does for apps. `modules` itself never installs/enables/
 disables/uninstalls anything -- it's read-only drift reporting. To
-actually install a missing module, run `install`: it fetches and installs
+actually install a missing module, run `apply`: it fetches and installs
 any configured module that isn't already present, the same way it does
 for apps (a plan first, then a confirmation prompt, skippable with
 `-y`/`--yes`/`--noconfirm`/`--no-confirm`, previewable with `--dry-run`).
@@ -328,11 +328,11 @@ root:
   framework: apatch|magisk  # optional; skips auto-detection if you already know.
                              # --root-framework overrides both of these, for a
                              # single invocation (also works with generate-config
-                             # and install).
+                             # and apply).
 modules:
   - id: <module id>       # matches the module's module.prop id= field
     name: <display name>   # optional, cosmetic only
-    source: github|url|local  # optional, defaults to github -- where `install`
+    source: github|url|local  # optional, defaults to github -- where `apply`
                                # fetches the module zip from
     repo: <owner>/<repo>        # required when source is github
     asset: <regex>               # (github only) selects the release zip;
@@ -356,7 +356,7 @@ list seeded from whatever's actually installed (skipped entirely for a
 non-rooted device -- no empty `root:`/`modules:` clutter).
 
 ```console
-$ declaroid install
+$ declaroid apply
 INF Target device: 10.5.0.159:37819
 OK Nothing to install on 10.5.0.159:37819 (30 already installed)
 Module install plan for 10.5.0.159:37819: 1 module(s) to install
@@ -395,7 +395,7 @@ tested against a real device and reliably hangs rather than erroring.
 
 Uses `fdroidcl install <pkg>` against the target device (via `$ANDROID_SERIAL`,
 which is how fdroidcl itself picks a device). declaroid runs `fdroidcl update`
-once per `install` invocation if any configured app uses this store.
+once per `apply` invocation if any configured app uses this store.
 fdroidcl manages its own APK cache; declaroid doesn't wrap it in its own
 cache directory.
 
@@ -469,7 +469,7 @@ Like `gplay`, split APKs are deduped by checksum before `adb install-multiple`.
 
 Downloads for `gplay` and `github` apps are cached under
 `${XDG_CACHE_HOME:-$HOME/.cache}/declaroid/<package-id>/`, keyed by package
-ID. A cache hit skips the download entirely on the next `install` run,
+ID. A cache hit skips the download entirely on the next `apply` run,
 which matters because gplay/github downloads can be tens to hundreds of MB.
 Use `-f`/`--force-download` to bypass the cache for one run, or
 `declaroid clear-cache` to wipe it (the whole thing, or just specific
@@ -575,7 +575,7 @@ rows show the package id in both the name and pkg columns.
 
 ### Install plan and confirmation
 
-`install` first checks, per device, which configured apps are actually
+`apply` first checks, per device, which configured apps are actually
 missing -- nothing is downloaded or installed yet at this point -- then
 prints that plan (name/pkg/store of each pending app, plus a count of how
 many are already installed) and asks for confirmation before doing anything,
