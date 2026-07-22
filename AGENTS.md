@@ -764,6 +764,36 @@ incomplete change, not a follow-up.
   against a non-rooted device (zf10) correctly skipped with `OK Root not
   enabled/detected on ..., skipping configured Obtainium repo(s)` rather
   than erroring.
+- **Two real bugs found by the user hitting them for real, both fixed and
+  re-verified live:**
+  1. **`Android/data/<pkg>` doesn't exist right after a fresh install --
+     confirmed empirically** (`stat`/`ls` on it: "No such file or
+     directory" immediately after `apply` had just installed
+     `dev.imranr.obtainium.fdroid` in the same run). Android only creates
+     an app's scoped-storage dir the first time the app itself actually
+     runs, not at install time -- there's no `pm`/`stat`-only way around
+     this. Fixed by launching the app once via `monkey -p <pkg> -c
+     android.intent.category.LAUNCHER 1` (headless, no launcher-activity
+     name to resolve/hardcode) then `am force-stop`-ing it right back
+     before the owner-detection `stat` -- confirmed the dir (and
+     Obtainium's own `app_data/` subdirectory inside it) exists
+     immediately after. Only done outside `--dry-run` (a preview never
+     needs `$owner` or a directory that might not exist yet, so it skips
+     this dance entirely).
+  2. **`list_extra_pkgs` (backing both `--enforce` and `diff`'s
+     "unconfigured" reporting) only ever checked `.apps[].pkg`, not
+     `.obtainium[].pkg`** -- so a device with a repo declared *only* under
+     `obtainium:` (by design: `obtainium:` is a tracking pointer, not an
+     install directive, see the README) got flagged as an unrecognized
+     app and **was actually uninstalled** by `--enforce` in a real run
+     (`com.kieronquinn.app.smartspacer`, confirmed gone via `pm list
+     packages` afterward -- a real, user-visible regression, not just a
+     false positive in a report). Fixed by also folding
+     `(.obtainium // [])[].pkg` into `list_extra_pkgs`'s `configured` set.
+     `obtainium:` entries still never get *installed* by declaroid itself
+     (that stays exclusively `apps:`'s job) -- this fix only stops
+     `--enforce` from removing an app it doesn't recognize as configured
+     when it actually is, just under a different key.
 
 ## Nix packaging
 

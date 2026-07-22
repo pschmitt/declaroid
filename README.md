@@ -478,6 +478,15 @@ internal state, so this stays a thin pointer rather than a second source of
 truth for the metadata Obtainium tracks on its own (`latestVersion`,
 `apkUrls`, etc).
 
+Declaring a repo here never installs the app itself -- that's what `apps:`
+is for, same as any other app. `obtainium:` only ever writes Obtainium's
+own tracking pointer; if a tracked app isn't actually installed on the
+device, it stays that way (`apply` doesn't side-load it, and won't remove
+it from Obtainium's tracking either). A tracked pkg does count as
+"configured" for `--enforce`/`diff` purposes even without a matching
+`apps:` entry, though -- otherwise `--enforce` would see it as an
+unrecognized app and offer to uninstall it right out from under Obtainium.
+
 There is no way to force Obtainium to fetch/refresh a newly-seeded entry's
 metadata immediately -- it only happens the next time the app is opened, or
 via its own ~15 minute background check. Obtainium exposes no headless

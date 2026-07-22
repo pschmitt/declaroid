@@ -3448,8 +3448,16 @@ list_extra_pkgs() {
   local config="$1"
   local device="$2"
 
+  # obtainium: entries declare a pkg Obtainium should track, not one
+  # declaroid itself installs/manages -- but the whole point of tracking it
+  # is that it's expected to be present on the device (side-loaded via
+  # Obtainium), so it must count as "configured" here too, or --enforce/
+  # `diff` would flag it as unconfigured and offer to uninstall it right
+  # out from under Obtainium (confirmed as a real bug: a device with
+  # com.kieronquinn.app.smartspacer only in obtainium:, not apps:, had it
+  # uninstalled by --enforce).
   local -a configured_pkgs
-  mapfile -t configured_pkgs < <(yq -r '.apps[].pkg' "$config")
+  mapfile -t configured_pkgs < <(yq -r '.apps[].pkg, (.obtainium // [])[].pkg' "$config")
 
   local -A configured=()
   local p
@@ -4086,20 +4094,46 @@ sync_obtainium_repos() {
     return 1
   fi
 
-  local app_data_dir="/storage/emulated/0/Android/data/$obtainium_pkg/files/app_data"
+  local storage_dir="/storage/emulated/0/Android/data/$obtainium_pkg"
+  local app_data_dir="$storage_dir/files/app_data"
 
-  # The new file has to end up owned by Obtainium's own app UID/GID (not
-  # root's) or Obtainium can't read it back -- confirmed by matching a real
-  # device's existing app_data files (owner u0_a197:sdcard_rw there, but
-  # the exact uid varies per device/user, so this reads it from the app's
-  # own storage dir rather than hardcoding a name).
+  # Only needed for a real write below -- dry-run only ever checks
+  # already-tracked-or-not via a plain file existence test further down,
+  # so it doesn't need $owner (or a storage dir that might not exist yet)
+  # at all.
   local owner
-  owner="$(run_root_shell "$device" "stat -c '%U:%G' /storage/emulated/0/Android/data/$obtainium_pkg")"
-
-  if [[ -z "$owner" ]]
+  if [[ -z "$DRY_RUN" ]]
   then
-    log_error "Could not determine $obtainium_pkg's storage owner on $device, skipping configured Obtainium repo(s)"
-    return 1
+    if [[ -z "$(run_root_shell "$device" "[ -d '$storage_dir' ] && echo yes")" ]]
+    then
+      # A fresh install has no scoped-storage dir at all yet -- Android
+      # only creates Android/data/<pkg> the first time the app itself
+      # runs, not at install time (confirmed against a real device: apply
+      # installed dev.imranr.obtainium.fdroid earlier in the very same
+      # run, and its storage dir didn't exist until launched once).
+      # `monkey`'s LAUNCHER-category launch works headlessly (no need to
+      # resolve/hardcode a main activity name); force-stopping it right
+      # back leaves the device otherwise as it was -- Obtainium itself
+      # creates its own app_data/ subdirectory on startup, so one launch
+      # is enough for every step below to work.
+      log_step "Launching $obtainium_pkg once to create its storage directory"
+      adb -s "$device" shell monkey -p "$obtainium_pkg" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
+      sleep 2
+      adb -s "$device" shell am force-stop "$obtainium_pkg" >/dev/null 2>&1
+    fi
+
+    # The new file has to end up owned by Obtainium's own app UID/GID (not
+    # root's) or Obtainium can't read it back -- confirmed by matching a
+    # real device's existing app_data files (owner u0_a197:sdcard_rw
+    # there, but the exact uid varies per device/user, so this reads it
+    # from the app's own storage dir rather than hardcoding a name).
+    owner="$(run_root_shell "$device" "stat -c '%U:%G' '$storage_dir'")"
+
+    if [[ -z "$owner" ]]
+    then
+      log_error "Could not determine $obtainium_pkg's storage owner on $device (even after launching it once), skipping configured Obtainium repo(s)"
+      return 1
+    fi
   fi
 
   local row pkg url settings_json rc=0
