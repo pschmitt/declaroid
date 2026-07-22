@@ -186,6 +186,21 @@ incomplete change, not a follow-up.
   prompts once per device for the whole batch of extra packages, not once
   per package, mirroring `cmd_uninstall`'s existing confirmation pattern
   (skippable with the same `-y|--yes|--noconfirm|--no-confirm`).
+- `install` builds a plan before touching anything: `build_install_plan`
+  does a read-only pass (`is_installed` per configured app, no logging) to
+  find what's actually missing on the device, `print_install_plan` shows
+  that (pending apps plus a count of already-installed ones) and `cmd_install`
+  prompts per device before calling the *existing* `for_each_app "$config"
+  install_app` unchanged -- the plan doesn't feed installs directly, it's
+  purely a preview/confirm gate in front of the same install path as before.
+  `install_app` still re-checks `is_installed` itself during the real pass
+  (a second, cheap `pm list packages` call, not worth avoiding); its
+  already-installed skip message is now gated on a new `VERBOSE` local
+  (`-v|--verbose`, set in `cmd_install` alongside `DRY_RUN`/`FORCE_DOWNLOAD`
+  and read the same dynamically-scoped way) so it's silent by default --
+  the plan's count already covers that case, no need for per-app spam too.
+  `build_install_plan` uses `mapfile` + `for`, not `while read < <(...)`, per
+  the ban above.
 - **`-t 1` must never be tested inside a function that gets called from
   `$(...)`** -- it reads the tty-ness of the *current* file descriptor 1,
   and inside a command substitution that's always the pipe capturing the

@@ -122,7 +122,7 @@ $ declaroid COMMAND [OPTIONS]
 
 | Command | Description |
 |---|---|
-| `install` | Download (if not already cached) and install configured apps |
+| `install` | Download (if not already cached) and install configured apps (shows a plan, prompts to confirm) |
 | `uninstall` | Uninstall configured apps (no download) |
 | `diff` | Show which configured apps are installed vs missing, no changes made (`--full`: also list device apps not in the config) |
 | `search QUERY` | Search Google Play and/or F-Droid; no device or config needed |
@@ -140,7 +140,8 @@ $ declaroid COMMAND [OPTIONS]
 | `--dry-run` | install, uninstall | Print what would happen, don't do it |
 | `-f, --force-download` | install | Re-download even if a cached copy exists |
 | `--enforce` | install | Also uninstall device apps that aren't in the config (prompts once per device) |
-| `-y, --yes, --noconfirm, --no-confirm` | install --enforce, uninstall, clear-cache | Skip the confirmation prompt |
+| `-y, --yes, --noconfirm, --no-confirm` | install, install --enforce, uninstall, clear-cache | Skip the confirmation prompt |
+| `-v, --verbose` | install | Also log each already-installed app as it's skipped, instead of just a count in the plan |
 | `-o, --output FILE` | generate-config | Write to FILE instead of stdout |
 | `--system` | generate-config | Include system apps too (default: third-party only) |
 | `--no-labels, --fast` | generate-config | Skip app name resolution, use the package id instead |
@@ -478,6 +479,19 @@ that has no matching `pkg:` entry anywhere in the config, as a third status,
 plumbing out of that list. This is a read against the device only (a single
 `pm list packages -3`); it doesn't resolve app names via `aapt2`, so `extra`
 rows show the package id in both the name and pkg columns.
+
+### Install plan and confirmation
+
+`install` first checks, per device, which configured apps are actually
+missing -- nothing is downloaded or installed yet at this point -- then
+prints that plan (name/pkg/store of each pending app, plus a count of how
+many are already installed) and asks for confirmation before doing anything,
+per device. Already-installed apps are only ever summarized as a count here,
+not logged individually; pass `-v`/`--verbose` to also see each one as it's
+skipped during the actual install pass. Skip the prompt with
+`-y`/`--yes`/`--noconfirm`/`--no-confirm`, or preview it without installing
+anything via `--dry-run`. Declining for a device just skips installing on
+that device -- `--enforce` (below) still runs afterward if requested.
 
 ### Uninstall confirmation
 

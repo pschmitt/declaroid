@@ -70,6 +70,8 @@ IzzyOnDroid (fdroidcl), a GitHub repo's release assets, or a local APK file.
 
 ${C_BOLD}Commands:${C_RESET}
   ${C_CYAN}install${C_RESET}     Download (if not already cached) and install configured apps
+              (shows a plan of what's actually pending first, then prompts
+              for confirmation; see -y and -v below)
   ${C_CYAN}uninstall${C_RESET}   Uninstall configured apps (no download)
   ${C_CYAN}diff${C_RESET}        Show which configured apps are installed vs missing, no changes made
               (--full also lists device apps that aren't in the config)
@@ -94,7 +96,9 @@ ${C_BOLD}Options:${C_RESET}
       ${C_YELLOW}--enforce${C_RESET}           (install only) Also uninstall device apps that aren't in the config
                           (prompts once per device; see -y below)
   ${C_YELLOW}-y, --yes, --noconfirm, --no-confirm${C_RESET}
-                          (install --enforce/uninstall/clear-cache) Skip the confirmation prompt
+                          (install/install --enforce/uninstall/clear-cache) Skip the confirmation prompt
+  ${C_YELLOW}-v, --verbose${C_RESET}           (install only) Also log each already-installed app as it's
+                          skipped, instead of just a count in the plan
   ${C_YELLOW}-o, --output FILE${C_RESET}       (generate-config only) Write to FILE instead of stdout
       ${C_YELLOW}--system${C_RESET}            (generate-config only) Include system apps too (default: third-party only)
       ${C_YELLOW}--no-labels, --fast${C_RESET} (generate-config only) Skip resolving app names via aapt2, use the package id instead (faster)
@@ -910,7 +914,7 @@ install_app() {
 
   if is_installed "$DEVICE_SERIAL" "$CURRENT_PKG"
   then
-    log_skip "$CURRENT_NAME ($CURRENT_PKG) already installed"
+    [[ -n "$VERBOSE" ]] && log_skip "$CURRENT_NAME ($CURRENT_PKG) already installed"
     return 0
   fi
 
@@ -1025,11 +1029,67 @@ for_each_app() {
   log_ok "All apps processed successfully"
 }
 
+# Read-only pass over the config: populates PLAN_PENDING (tab-separated
+# name/pkg/store rows) with configured apps not yet installed on
+# $DEVICE_SERIAL, and PLAN_SKIP_COUNT with how many already are. Assigns
+# straight into the caller's PLAN_PENDING/PLAN_SKIP_COUNT locals (same
+# dynamic-scoping convention as CURRENT_*/DEVICE_SERIAL elsewhere) rather
+# than being local itself. Never logs anything -- this only builds the plan
+# that print_install_plan then shows once, up front; per-app "already
+# installed" messages are still install_app's job, during the real pass,
+# gated on --verbose there. Uses mapfile + a plain for loop, not a
+# `while read < <(...)`, per the ban on that construct elsewhere in this
+# file (see AGENTS.md).
+build_install_plan() {
+  local config="$1"
+  PLAN_PENDING=()
+  PLAN_SKIP_COUNT=0
+
+  local -a rows
+  mapfile -t rows < <(app_rows "$config")
+
+  local row name pkg store rest
+  for row in "${rows[@]}"
+  do
+    IFS='§' read -r name pkg store rest <<< "$row"
+
+    if is_installed "$DEVICE_SERIAL" "$pkg"
+    then
+      PLAN_SKIP_COUNT=$((PLAN_SKIP_COUNT + 1))
+    else
+      PLAN_PENDING+=("$name"$'\t'"$pkg"$'\t'"$store")
+    fi
+  done
+}
+
+# Prints the plan built by build_install_plan for confirmation. Read-only.
+print_install_plan() {
+  local device="$1"
+  local p name pkg store
+
+  {
+    printf '%sInstall plan for %s:%s %d app(s) to install' \
+      "$C_BOLD" "$device" "$C_RESET" "${#PLAN_PENDING[@]}"
+    if [[ "$PLAN_SKIP_COUNT" -gt 0 ]]
+    then
+      printf ' (%d already installed)' "$PLAN_SKIP_COUNT"
+    fi
+    printf '\n'
+
+    for p in "${PLAN_PENDING[@]}"
+    do
+      IFS=$'\t' read -r name pkg store <<< "$p"
+      printf '  %s (%s) [%s%s%s]\n' "$name" "$pkg" "$C_CYAN" "$store" "$C_RESET"
+    done
+  } >&2
+}
+
 cmd_install() {
   local config="$DEFAULT_CONFIG"
   local cli_device=""
   local DRY_RUN=""
   local FORCE_DOWNLOAD=""
+  local VERBOSE=""
   local bulk=""
   local enforce=""
   local assume_yes=""
@@ -1063,6 +1123,10 @@ cmd_install() {
         ;;
       -y|--yes|--noconfirm|--no-confirm)
         assume_yes=1
+        shift
+        ;;
+      -v|--verbose)
+        VERBOSE=1
         shift
         ;;
       --bulk|--all-devices|--all)
@@ -1130,13 +1194,40 @@ cmd_install() {
   fi
 
   local DEVICE_SERIAL TARGET_USER overall_rc=0
+  local -a PLAN_PENDING
+  local PLAN_SKIP_COUNT
   for DEVICE_SERIAL in "${devices[@]}"
   do
     log_step "Target device: $DEVICE_SERIAL"
     TARGET_USER="$(resolve_target_user "$DEVICE_SERIAL")"
-    if ! for_each_app "$config" install_app
+
+    build_install_plan "$config"
+
+    if [[ ${#PLAN_PENDING[@]} -eq 0 ]]
     then
-      overall_rc=1
+      log_ok "Nothing to install on $DEVICE_SERIAL ($PLAN_SKIP_COUNT already installed)"
+    else
+      print_install_plan "$DEVICE_SERIAL"
+
+      local proceed=1
+      if [[ -z "$DRY_RUN" && -z "$assume_yes" ]]
+      then
+        local reply
+        read -rp "Install these ${#PLAN_PENDING[@]} app(s) on $DEVICE_SERIAL? [y/N] " reply
+        case "$reply" in
+          y|Y|yes|YES)
+            ;;
+          *)
+            log_step "Skipping install on $DEVICE_SERIAL"
+            proceed=""
+            ;;
+        esac
+      fi
+
+      if [[ -n "$proceed" ]] && ! for_each_app "$config" install_app
+      then
+        overall_rc=1
+      fi
     fi
 
     if [[ -n "$enforce" ]] && ! enforce_config "$config" "$DEVICE_SERIAL" "$DRY_RUN" "$assume_yes"
