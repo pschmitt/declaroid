@@ -274,15 +274,16 @@ device file gives you two rows, not one. An import can itself have its
 own `imports:` (resolved recursively), and a cycle is detected and
 rejected rather than hanging.
 
-`enforce:`/`grant_permissions:` cascade in differently -- as a scalar
-override, not a concatenation: the importing file's own value wins if it
-sets the key at all, otherwise the last import in the list that sets it
-does. This is what lets a shared `imports/base.yaml` carry a default like
-`enforce: true` for every device that imports it, without repeating it in
-every device file:
+`enforce:`/`grant_permissions:`/`store:` cascade in differently -- as a
+scalar override, not a concatenation: the importing file's own value wins
+if it sets the key at all, otherwise the last import in the list that
+sets it does. This is what lets a shared `imports/base.yaml` carry a
+default like `enforce: true` for every device that imports it, without
+repeating it in every device file:
 
 ```yaml
 # imports/base.yaml
+store: gplay
 enforce: true
 grant_permissions: true
 ```
@@ -291,14 +292,14 @@ grant_permissions: true
 # px5.yaml
 imports:
   - imports/base.yaml
-# no enforce:/grant_permissions: of its own -- inherits both as true
+# no store:/enforce:/grant_permissions: of its own -- inherits all three
 ```
 
-Every other top-level key (`device:`, `store:`, `adb:`, `root:`,
-`profile:`) only ever comes from the file you actually pointed
-`--config`/`-c` at -- a shared fragment is just a library of
-apps/modules/obtainium repos (plus, optionally, `enforce:`/
-`grant_permissions:` defaults), not a device template of its own.
+Every other top-level key (`device:`, `adb:`, `root:`, `profile:`) only
+ever comes from the file you actually pointed `--config`/`-c` at -- a
+shared fragment is just a library of apps/modules/obtainium repos (plus,
+optionally, `enforce:`/`grant_permissions:`/`store:` defaults), not a
+device template of its own.
 
 This only applies to `apply`/`uninstall`/`diff`/`modules` -- `add` and
 `download` always read (and `add` writes) the file you point them at

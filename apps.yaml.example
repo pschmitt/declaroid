@@ -12,9 +12,9 @@
 #   - common-apps.yaml
 #   - common-modules.yaml
 
-# enforce:/grant_permissions: (see below) cascade in from imports as an
-# override instead -- this file's own value wins if it sets the key at
-# all, else the last import that sets it does. Lets a shared
+# enforce:/grant_permissions:/store: (see below) cascade in from imports
+# as an override instead -- this file's own value wins if it sets the key
+# at all, else the last import that sets it does. Lets a shared
 # imports/base.yaml carry a default for every device config that imports
 # it, without repeating it everywhere.
 

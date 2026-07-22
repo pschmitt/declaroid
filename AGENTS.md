@@ -436,22 +436,34 @@ incomplete change, not a follow-up.
   fixing it would mean either resolving twice (once merged for the check,
   once raw for the write) or threading a second config value through
   `cmd_add`/`add_app_to_config`, and it hasn't been worth it yet.
-- **`enforce:`/`grant_permissions:` cascade in from imports too, but as a
-  scalar override, not the list-key concatenation above** -- added so a
-  shared `imports/base.yaml` can carry `enforce: true` (and now
-  `grant_permissions: true`) for every device config that imports it,
-  without each one repeating it. `resolve_config`'s second loop (`for
-  scalar_key in enforce grant_permissions`) checks `yq 'has("$key")'`
-  against the *original* `$config` first -- if it's set there at all
-  (even to `false`), that wins outright and no import is consulted; only
-  an absent key falls through to the last import (in listed order) that
-  has it. Deliberately only these two keys -- `device:`/`store:`/`adb:`/
-  `root:`/`profile:` stay squarely per-device, never cascaded. Verified
-  via `bash -x` against a real device: a config importing a `base.yaml`
-  with both keys set to `true`, itself setting neither, correctly ended
-  up with `enforce=1`/`GRANT_PERMISSIONS=1` in the trace, and a real
-  `apply --dry-run` against it genuinely ran `enforce_config` (listed
-  every installed-but-unconfigured app, exactly `--enforce`'s behavior).
+- **`enforce:`/`grant_permissions:`/`store:` cascade in from imports too,
+  but as a scalar override, not the list-key concatenation above** --
+  added so a shared `imports/base.yaml` can carry `enforce: true`/
+  `grant_permissions: true`/`store: gplay` for every device config that
+  imports it, without each one repeating it. `resolve_config`'s second
+  loop (`for scalar_key in enforce grant_permissions store`) checks `yq
+  'has("$key")'` against the *original* `$config` first -- if it's set
+  there at all (even to `false`), that wins outright and no import is
+  consulted; only an absent key falls through to the last import (in
+  listed order) that has it. Deliberately only these three keys --
+  `device:`/`adb:`/`root:`/`profile:` stay squarely per-device, never
+  cascaded.
+  **The value is round-tripped through its own one-line temp file and
+  `load(strenv(...))`, not extracted via `yq -r` and spliced back in as
+  bare text** -- confirmed necessary while adding `store:` to the list,
+  not just tidier: bare-text splicing (`.enforce = $value`) happens to
+  work for a boolean (`true`/`false` are valid bare yq-expression
+  literals) but genuinely breaks for any string (`.store = gplay` errors
+  with "invalid input text" -- yq's *expression* language has no
+  bare-unquoted-string syntax, unlike YAML itself). Reproduced the break
+  with a two-file test before switching to `load()`, same fix shape as
+  the list-key merge above.
+  Verified via `bash -x` against a real device: a config importing a
+  `base.yaml` with `enforce`/`grant_permissions` set to `true`, itself
+  setting neither, correctly ended up with `enforce=1`/
+  `GRANT_PERMISSIONS=1` in the trace, and a real `apply --dry-run`
+  against it genuinely ran `enforce_config` (listed every
+  installed-but-unconfigured app, exactly `--enforce`'s behavior).
 - **`yq eval-all '[(.$key // [])[]]' file1 file2 ...' -- confirmed as the
   working idiom for "concatenate this one array key across N files, in
   file order."** Verified empirically (a 3-file test, `.apps` from each,

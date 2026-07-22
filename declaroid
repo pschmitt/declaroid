@@ -182,13 +182,13 @@ ${C_BOLD}Config schema:${C_RESET}
                                                # recursively -- an import may itself have
                                                # imports:), then this file's own -- pure
                                                # concatenation, no override/dedup by pkg/id.
-                                               # enforce:/grant_permissions: cascade in from
-                                               # imports differently (override, not
+                                               # enforce:/grant_permissions:/store: cascade in
+                                               # from imports differently (override, not
                                                # concatenation): this file's own value wins if
                                                # set at all, else the last import that sets it
                                                # does -- lets a shared imports/base.yaml carry
                                                # a default for every device that imports it.
-                                               # Every other top-level key never cascades this
+                                               # device:/adb:/root:/profile: never cascade this
                                                # way. Applies to apply/uninstall/diff/modules
                                                # only -- add/download always read and write the
                                                # file as-is, ignoring imports:.
@@ -1754,10 +1754,10 @@ collect_imports() {
 # first, so a device-specific file's own list conceptually reads as "on
 # top of the shared ones", though this is pure concatenation, not an
 # override/dedup by pkg/id) into a throwaway temp copy, and prints *that*
-# path instead. `enforce`/`grant_permissions` additionally cascade in from
-# imports as scalar overrides (config's own value wins if set at all,
-# else the last import that sets it) -- see the scalar_key loop below.
-# Every other top-level key (device/store/adb/root/profile) is copied
+# path instead. `enforce`/`grant_permissions`/`store` additionally cascade
+# in from imports as scalar overrides (config's own value wins if set at
+# all, else the last import that sets it) -- see the scalar_key loop
+# below. Every other top-level key (device/adb/root/profile) is copied
 # verbatim from $config, untouched -- imports never contribute to those.
 # Every caller (cmd_apply/cmd_uninstall/
 # cmd_diff/cmd_modules) reassigns its own local `config` to this function's
@@ -1807,12 +1807,21 @@ resolve_config() {
   # (a device config's own value always wins if it sets the key at all;
   # otherwise the last import in the list that sets it wins) -- this is
   # what lets a shared imports/base.yaml carry defaults like `enforce:
-  # true` for every device that imports it, without every device file
-  # having to repeat it. Deliberately only these two keys, not
-  # device/store/adb/root/profile -- those stay squarely a per-device
+  # true`/`store: gplay` for every device that imports it, without every
+  # device file having to repeat it. Deliberately only these three keys,
+  # not device/adb/root/profile -- those stay squarely a per-device
   # concern, never cascaded from an import.
-  local scalar_key has_own has_import chosen_file imp_val imp
-  for scalar_key in enforce grant_permissions
+  #
+  # The value is round-tripped through its own one-line temp file and
+  # `load(strenv(...))`, same mechanism as the list-key merge above, not
+  # extracted via `yq -r` and spliced back in as bare text -- confirmed
+  # necessary, not just tidier: a bare-text splice works by accident for a
+  # boolean (`.enforce = true` is valid yq-expression syntax on its own)
+  # but breaks for any string value (`.store = gplay` errors out, "invalid
+  # input text" -- yq's expression language, unlike YAML itself, has no
+  # bare-unquoted-string literal syntax).
+  local scalar_key has_own has_import chosen_file imp_val_file imp
+  for scalar_key in enforce grant_permissions store
   do
     has_own="$(yq -r "has(\"$scalar_key\")" "$config")"
     [[ "$has_own" == true ]] && continue
@@ -1825,8 +1834,10 @@ resolve_config() {
     done
     [[ -z "$chosen_file" ]] && continue
 
-    imp_val="$(yq -r ".$scalar_key" "$chosen_file")"
-    yq -i ".$scalar_key = $imp_val" "$resolved"
+    imp_val_file="$(mktemp --suffix=.yaml)"
+    yq eval ".$scalar_key" "$chosen_file" > "$imp_val_file"
+    DECLAROID_SCALAR_FILE="$imp_val_file" yq -i ".$scalar_key = load(strenv(DECLAROID_SCALAR_FILE))" "$resolved"
+    rm -f "$imp_val_file"
   done
 
   printf '%s\n' "$resolved"
