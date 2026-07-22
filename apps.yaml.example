@@ -100,8 +100,9 @@ apps:
     store: fdroid
 
 # Optional (apply only). Repos for Obtainium (installed above) to track --
-# requires root; errors out if root is enabled but Obtainium itself isn't
-# installed, skipped entirely (no error) if root.enabled is false. Only
+# root not required (plain adb shell already has the group access it
+# needs by stock default; root is just used when available for a more
+# precise write). Errors out if Obtainium itself isn't installed. Only
 # adds missing entries; already-tracked ones are left untouched. settings:
 # keys are Obtainium's own upstream setting names, used verbatim (e.g.
 # includePrereleases: true for a repo whose only release(s) are marked

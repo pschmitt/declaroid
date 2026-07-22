@@ -762,18 +762,47 @@ incomplete change, not a follow-up.
   pointer file; it does not attempt to force Obtainium to populate
   `latestVersion`/etc immediately, and the README says so rather than
   implying it's instant.
-- **Requires root, unconditionally** -- scoped storage under
-  `Android/data/<pkg>/` is unreadable/unwritable for anything but the
-  owning app's own UID without root. `sync_obtainium_repos` calls
-  `resolve_root_framework` first and returns early (an `OK`-level skip, not
-  an error -- this is expected/routine on a non-rooted device) if root
-  isn't enabled/detected, exactly like modules do.
-- **Ownership/permissions are read from the live device, never
-  hardcoded** -- `stat -c '%U:%G' /storage/emulated/0/Android/data/<pkg>`
-  gives the app's actual UID:GID (e.g. `u0_a197:sdcard_rw` on a real
-  device), then the pushed JSON gets `chown`'d to match and `chmod 660`;
-  a mismatched owner means Obtainium's own process can't read the file
-  back even though it's technically present.
+- **Does NOT actually require root -- this was the original assumption
+  going in, and it was wrong, corrected only after testing it live
+  against a real non-rooted device (zf10, stock `user` build).**
+  `run-as` was tried first and refuses outright there ("package not
+  debuggable": Obtainium's release APK isn't debuggable, and `user`
+  builds only allow `run-as` for debuggable/profileable apps or on a
+  debuggable/eng build). But plain, unprivileged `adb shell` (uid 2000)
+  turned out to already be a *supplementary* member of both `sdcard_rw`
+  and `ext_data_rw` by stock AOSP default (confirmed via `id`) -- exactly
+  the groups that own every app's `Android/data/<pkg>` tree (`drwxrws---
+  ... ext_data_rw`, confirmed via `ls -la`). The `s` in `rws` is SGID: a
+  file plain shell creates under that directory inherits the directory's
+  *group* automatically, regardless of shell's own primary group, so it
+  ends up group-readable by the app (which has that same group as one of
+  *its* own supplementary groups) with zero elevated privilege anywhere
+  in the chain. Live-verified end to end: seeded a real entry via plain
+  `adb shell`/`adb push` only, and a screenshot of Obtainium's own Apps
+  list on that device showed it picked up immediately, indistinguishable
+  from the rooted case. `sync_obtainium_repos` now calls
+  `resolve_root_framework` only to decide whether root is *available*
+  (setting `use_root`, used purely to prefer the marginally more precise
+  `chown`-to-exact-UID write when possible) -- never as a hard
+  requirement; `obtainium_shell` is the small wrapper that picks `su -c`
+  vs. plain `adb shell` based on that flag, used at every step (dir-exists
+  checks, the launch-if-missing dance, the actual write). The one thing
+  that's still an error rather than a silent skip: if *neither* root
+  *nor* plain shell can write to the directory (checked via `[ -w ... ]`
+  when `use_root` is unset) -- possible in principle on some
+  non-stock/hardened ROM, just not observed on any real device tested so
+  far.
+- **Ownership/permissions are read from the live device when root is
+  available, never hardcoded** -- `stat -c '%U:%G'
+  /storage/emulated/0/Android/data/<pkg>` gives the app's actual UID:GID
+  (e.g. `u0_a197:sdcard_rw` on a real device), then the pushed JSON gets
+  `chown`'d to match and `chmod 660`; skipped (no `chown` at all) on the
+  non-root path, which relies on SGID group inheritance instead (see
+  above) -- both end up group-readable by the app either way, just via a
+  different mechanism. A mismatched owner/group on the root path would
+  mean Obtainium's own process can't read the file back even though it's
+  technically present -- this is why it's read from the app's own storage
+  dir at write time rather than hardcoded.
 - **Supports both `dev.imranr.obtainium` and `dev.imranr.obtainium.fdroid`**
   -- checks `is_installed` for the F-Droid variant first, falls back to the
   base package, and **errors out** (`return 1`, not a skip) if neither is

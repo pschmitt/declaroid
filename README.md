@@ -487,13 +487,22 @@ obtainium:
     url: "https://github.com/KieronQuinn/Smartspacer"
 ```
 
-This **requires root** (scoped storage is otherwise unreadable/unwritable
-for anything but the owning app itself) and is skipped entirely, with a
-notice, on a device with `root.enabled: false`. On a rooted device it's an
-**error** (apply exits non-zero) if neither `dev.imranr.obtainium` nor
-`dev.imranr.obtainium.fdroid` is installed there -- make sure your config
-also installs Obtainium itself as a regular `apps:` entry (or via an
-import) if it declares `obtainium:` entries.
+**Root is not actually required for this**, despite scoped storage
+normally locking `Android/data/<pkg>` to the owning app's own UID -- plain
+`adb shell` is, by stock Android default, already a member of the same
+group that owns this directory (`sdcard_rw`/`ext_data_rw`), and the
+directory's own setgid bit makes any file it creates there inherit that
+group automatically. Confirmed live against a real non-rooted device: no
+`su`, no `run-as` (which outright refuses on a production build --
+"package not debuggable"), just a plain `adb shell`/`adb push`, and
+Obtainium picked the seeded entry up immediately. Root is still *used*
+when available (a marginally more precise write, `chown`'d to the app's
+own exact UID) but this now works the same either way.
+
+It's an **error** (apply exits non-zero) if neither `dev.imranr.obtainium`
+nor `dev.imranr.obtainium.fdroid` is installed on the device -- make sure
+your config also installs Obtainium itself as a regular `apps:` entry (or
+via an import) if it declares `obtainium:` entries.
 `apply` only ever adds missing entries -- an already-tracked `pkg` is left
 untouched, so re-running is a no-op. The JSON written is the minimal shape
 Obtainium's own `App.fromJson` accepts (id/url/author/name/additionalSettings

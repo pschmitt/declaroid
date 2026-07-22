@@ -292,8 +292,8 @@ ${C_BOLD}Config schema:${C_RESET}
                                        # false/unset re-enables it (pm enable)
                                        # on the next apply.
   obtainium:                                   # optional; repos for the Obtainium app itself
-                                                 # to track (apply only, requires root -- see
-                                                 # below)
+                                                 # to track (apply only; root not required, but
+                                                 # used when available -- see below)
     - pkg: <package id>                          # the tracked app's own package id
       url: <repo URL>                            # e.g. a GitHub repo URL, whatever Obtainium's
                                                    # own "Add App" would accept
@@ -345,13 +345,14 @@ isn't a reliable signal.
 (dev.imranr.obtainium or dev.imranr.obtainium.fdroid, whichever is
 installed) isn't already tracking, by writing a minimal JSON file directly
 into its scoped-storage app_data dir -- the same format Obtainium writes
-for itself, not a full vendored copy of its internal state. This requires
-root (scoped storage is otherwise unreadable/unwritable for anything but
-the owning app) and is skipped entirely, with a notice, on devices with
-root.enabled: false -- but it's an error (apply exits non-zero) if
-obtainium: entries are configured and root IS available yet neither
-Obtainium package is actually installed there, since that's a real
-misconfiguration rather than an expected limitation. Already-tracked
+for itself, not a full vendored copy of its internal state. Root is used
+when available (a slightly more precise write, chowned to the app's own
+exact UID) but is not actually required -- plain adb shell is, by stock
+Android default, already a member of the same group that owns this
+directory, confirmed live against a real non-rooted device. It's an error
+(apply exits non-zero) if obtainium: entries are configured yet neither
+Obtainium package is actually installed on the device, since that's a
+real misconfiguration rather than an expected limitation. Already-tracked
 entries are left untouched (no update/force-refetch), and there is no way
 to force Obtainium itself to fetch metadata for a newly-seeded entry
 immediately -- it only happens the next time Obtainium is opened or its
@@ -4216,15 +4217,43 @@ effective_obtainium_rows() {
 # Obtainium (an app-update-tracking app) self-updates whatever it tracks by
 # reading/writing one JSON file per tracked app under its own external
 # app-storage dir -- `/storage/emulated/0/Android/data/<obtainium
-# pkg>/files/app_data/<tracked pkg>.json` -- which requires root to access
-# at all (Android's scoped storage locks Android/data/* to the owning app's
-# own UID otherwise). This only ever *seeds* a missing entry, never
-# touches one that's already tracked -- Obtainium's own next update check
-# (background, ~15min via WorkManager, or whenever the user next opens the
-# app) fills in everything else (name, author, latestVersion, apkUrls,
-# ...) on its own; there's no clean way to force that check immediately
-# from adb (checked Obtainium's own source: only interactive deep-links
-# exist, `obtainium://add/...` and `obtainium://app/...`, both requiring a
+# pkg>/files/app_data/<tracked pkg>.json`.
+#
+# **Does NOT actually require root**, despite this feature originally
+# being built assuming it did -- confirmed live against a real non-rooted
+# device (zf10, a stock `user` build with `run-as` refusing outright:
+# "package not debuggable"). Plain, unprivileged `adb shell` (uid 2000,
+# gid 2000, NOT root) is still, by stock AOSP default, a *supplementary*
+# member of both `sdcard_rw` and `ext_data_rw` -- the exact groups that
+# own every app's `Android/data/<pkg>` tree (confirmed via `id` and via
+# `ls -la` on that path: `drwxrws--- ... ext_data_rw`). The `s` in
+# `rws` is SGID: any file plain `adb shell` creates under that directory
+# automatically inherits the directory's group, regardless of shell's own
+# primary group -- so a file plain shell writes there ends up
+# `shell:ext_data_rw` (or `shell:sdcard_rw`), group-readable, which is all
+# Obtainium itself (running with that same group as one of *its* own
+# supplementary groups) needs to read it back. No `su`, no `run-as`,
+# no owner-uid match required at all. Live-verified end to end on zf10:
+# seeded a real entry via plain `adb shell`/`adb push`, no `su` anywhere,
+# and a screenshot of Obtainium's own Apps list afterward showed it
+# picked up immediately with full metadata already resolved.
+#
+# Root is still preferred *when available* (checked via
+# resolve_root_framework, not required) purely because it lets the
+# written file be `chown`'d to the app's own exact UID instead of relying
+# on SGID group inheritance -- a marginally more faithful match to what
+# Obtainium would produce writing the file itself, not something the
+# non-root path is missing out on functionally. use_root below picks
+# between the two purely on that basis; either one is a fully supported,
+# equally real code path, not a root-preferred-with-a-degraded-fallback.
+#
+# This only ever *seeds* a missing entry, never touches one that's
+# already tracked -- Obtainium's own next update check (background,
+# ~15min via WorkManager, or whenever the user next opens the app) fills
+# in everything else (name, author, latestVersion, apkUrls, ...) on its
+# own; there's no clean way to force that check immediately from adb
+# (checked Obtainium's own source: only interactive deep-links exist,
+# `obtainium://add/...` and `obtainium://app/...`, both requiring a
 # confirmation tap, not something declaroid should fake via blind
 # screen-coordinate taps).
 #
@@ -4235,12 +4264,28 @@ effective_obtainium_rows() {
 # string, "{}" is fine); everything else (latestVersion, apkUrls,
 # preferredApkIndex, lastUpdateCheck, categories, ...) has an in-code
 # fallback and can be omitted entirely. Verified against a real rooted
-# device (mp4, previously-empty Obtainium install): the seeded entry
-# showed up immediately in Obtainium's own app list as a trackable,
-# not-yet-installed app with the correct URL/pkg, confirmed via a real
-# screenshot of the app's detail page -- not vendoring Obtainium's full
-# per-app JSON blob (much of which is its own live-refreshed cache state)
-# was a hard requirement here, not a nice-to-have.
+# device (mp4, previously-empty Obtainium install) and again against a
+# real non-rooted one (zf10): the seeded entry showed up immediately in
+# Obtainium's own app list as a trackable, not-yet-installed app with the
+# correct URL/pkg, confirmed via a real screenshot in both cases -- not
+# vendoring Obtainium's full per-app JSON blob (much of which is its own
+# live-refreshed cache state) was a hard requirement here, not a
+# nice-to-have.
+#
+# Runs $cmd via su if $use_root, else via plain, unprivileged adb shell.
+obtainium_shell() {
+  local device="$1"
+  local use_root="$2"
+  local cmd="$3"
+
+  if [[ -n "$use_root" ]]
+  then
+    run_root_shell "$device" "$cmd"
+  else
+    timeout 15 adb -s "$device" shell "$cmd" </dev/null 2>/dev/null | tr -d '\r'
+  fi
+}
+
 sync_obtainium_repos() {
   local config="$1"
   local device="$2"
@@ -4251,11 +4296,8 @@ sync_obtainium_repos() {
   [[ ${#rows[@]} -eq 0 ]] && return 0
   [[ ${#rows[@]} -eq 1 && -z "${rows[0]}" ]] && return 0
 
-  if ! resolve_root_framework "$config" "$cli_root_framework" "$device" >/dev/null
-  then
-    log_ok "Root not enabled/detected on $device, skipping configured Obtainium repo(s)"
-    return 0
-  fi
+  local use_root=""
+  resolve_root_framework "$config" "$cli_root_framework" "$device" >/dev/null 2>&1 && use_root=1
 
   # Obtainium ships (at least) two package id variants -- the plain GitHub
   # release build (dev.imranr.obtainium) and F-Droid's own separately-built
@@ -4306,10 +4348,10 @@ sync_obtainium_repos() {
   # already-tracked-or-not via a plain file existence test further down,
   # so it doesn't need $owner (or a storage dir that might not exist yet)
   # at all.
-  local owner
+  local owner=""
   if [[ -z "$DRY_RUN" ]]
   then
-    if [[ -z "$(run_root_shell "$device" "[ -d '$app_data_dir' ] && echo yes")" ]]
+    if [[ -z "$(obtainium_shell "$device" "$use_root" "[ -d '$app_data_dir' ] && echo yes")" ]]
     then
       # A fresh install has no scoped-storage dir at all yet -- Android
       # only creates Android/data/<pkg> the first time the app itself
@@ -4317,7 +4359,8 @@ sync_obtainium_repos() {
       # installed dev.imranr.obtainium.fdroid earlier in the very same
       # run, and its storage dir didn't exist until launched once).
       # `monkey`'s LAUNCHER-category launch works headlessly (no need to
-      # resolve/hardcode a main activity name). `files/app_data` itself is
+      # resolve/hardcode a main activity name); neither it nor
+      # `am force-stop` need root either way. `files/app_data` itself is
       # created by Obtainium's own Dart init code partway through startup
       # -- not by Android at process start, and not instantly -- so a
       # single fixed sleep is unreliable (confirmed against a real device:
@@ -4329,7 +4372,7 @@ sync_obtainium_repos() {
       adb -s "$device" shell monkey -p "$obtainium_pkg" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
 
       local waited=0
-      while [[ -z "$(run_root_shell "$device" "[ -d '$app_data_dir' ] && echo yes")" && "$waited" -lt 10 ]]
+      while [[ -z "$(obtainium_shell "$device" "$use_root" "[ -d '$app_data_dir' ] && echo yes")" && "$waited" -lt 10 ]]
       do
         sleep 1
         waited=$((waited + 1))
@@ -4337,23 +4380,39 @@ sync_obtainium_repos() {
 
       adb -s "$device" shell am force-stop "$obtainium_pkg" >/dev/null 2>&1
 
-      if [[ -z "$(run_root_shell "$device" "[ -d '$app_data_dir' ] && echo yes")" ]]
+      if [[ -z "$(obtainium_shell "$device" "$use_root" "[ -d '$app_data_dir' ] && echo yes")" ]]
       then
         log_error "$obtainium_pkg's app_data directory never appeared on $device after launching it, skipping configured Obtainium repo(s)"
         return 1
       fi
     fi
 
-    # The new file has to end up owned by Obtainium's own app UID/GID (not
-    # root's) or Obtainium can't read it back -- confirmed by matching a
-    # real device's existing app_data files (owner u0_a197:sdcard_rw
-    # there, but the exact uid varies per device/user, so this reads it
-    # from the app's own storage dir rather than hardcoding a name).
-    owner="$(run_root_shell "$device" "stat -c '%U:%G' '$storage_dir'")"
-
-    if [[ -z "$owner" ]]
+    if [[ -n "$use_root" ]]
     then
-      log_error "Could not determine $obtainium_pkg's storage owner on $device (even after launching it once), skipping configured Obtainium repo(s)"
+      # The new file ends up owned by Obtainium's own app UID/GID (not
+      # root's) when root is available -- confirmed by matching a real
+      # device's existing app_data files (owner u0_a197:sdcard_rw there,
+      # but the exact uid varies per device/user, so this reads it from
+      # the app's own storage dir rather than hardcoding a name). Not
+      # strictly required for Obtainium to read the file back (see the
+      # non-root SGID-group path above), just a closer match to what
+      # Obtainium would produce writing it itself.
+      owner="$(obtainium_shell "$device" "$use_root" "stat -c '%U:%G' '$storage_dir'")"
+
+      if [[ -z "$owner" ]]
+      then
+        log_error "Could not determine $obtainium_pkg's storage owner on $device (even after launching it once), skipping configured Obtainium repo(s)"
+        return 1
+      fi
+    elif [[ -z "$(obtainium_shell "$device" "" "[ -w '$app_data_dir' ] && echo yes")" ]]
+    then
+      # No root, and plain adb shell isn't a member of this dir's group
+      # either (confirmed possible in principle, just not seen on any
+      # real device tested so far -- every one had shell in sdcard_rw/
+      # ext_data_rw by stock default). A real, if apparently rare,
+      # failure mode -- not treated as a bug, just nothing more
+      # declaroid can do without root.
+      log_error "Neither root nor plain adb shell can write to $app_data_dir on $device, skipping configured Obtainium repo(s)"
       return 1
     fi
   fi
@@ -4364,7 +4423,7 @@ sync_obtainium_repos() {
     [[ -z "$row" ]] && continue
     IFS='§' read -r pkg url settings_json <<< "$row"
 
-    if [[ -n "$(run_root_shell "$device" "[ -e '$app_data_dir/$pkg.json' ] && echo yes")" ]]
+    if [[ -n "$(obtainium_shell "$device" "$use_root" "[ -e '$app_data_dir/$pkg.json' ] && echo yes")" ]]
     then
       [[ -n "$VERBOSE" ]] && log_skip "Obtainium repo $pkg already tracked"
       continue
@@ -4400,7 +4459,11 @@ sync_obtainium_repos() {
     fi
     rm -f "$json_file"
 
-    if run_root_shell "$device" "cp '$remote_tmp' '$app_data_dir/$pkg.json' && chown $owner '$app_data_dir/$pkg.json' && chmod 660 '$app_data_dir/$pkg.json'" >/dev/null
+    local write_cmd="cp '$remote_tmp' '$app_data_dir/$pkg.json'"
+    [[ -n "$use_root" ]] && write_cmd+=" && chown $owner '$app_data_dir/$pkg.json'"
+    write_cmd+=" && chmod 660 '$app_data_dir/$pkg.json'"
+
+    if obtainium_shell "$device" "$use_root" "$write_cmd" >/dev/null
     then
       log_ok "Obtainium repo $pkg added"
     else
