@@ -73,14 +73,16 @@ IzzyOnDroid (fdroidcl), a GitHub repo's release assets, or a local APK file.
 
 ${C_BOLD}Commands:${C_RESET}
   ${C_CYAN}install${C_RESET}     Download (if not already cached) and install configured apps
-              (shows a plan of what's actually pending first, then prompts
-              for confirmation; see -y and -v below)
+              and root modules (APatch/Magisk); shows a plan of what's
+              actually pending first, then prompts for confirmation
+              (see -y and -v below)
   ${C_CYAN}uninstall${C_RESET}   Uninstall configured apps (no download)
   ${C_CYAN}diff${C_RESET}        Show which configured apps are installed vs missing, no changes made
               (--full also lists device apps that aren't in the config)
   ${C_CYAN}modules${C_RESET}     Show configured root modules (APatch APModules/Magisk modules)
               vs what's actually on the device, read-only, no changes made
-              (--full also lists device modules that aren't in the config)
+              (--full also lists device modules that aren't in the config;
+              use "install" to actually install a missing one)
   ${C_CYAN}search${C_RESET} QUERY
               Search Google Play and/or F-Droid, print a colored table with
               clickable (OSC 8) links, no device or config needed
@@ -112,8 +114,8 @@ ${C_BOLD}Options:${C_RESET}
       ${C_YELLOW}--full${C_RESET}              (diff, modules) Also list device apps/modules that aren't in the
                           config, as "extra"
       ${C_YELLOW}--root-framework apatch|magisk${C_RESET}
-                          (modules, generate-config) Force which root framework to use
-                          instead of the config's root.framework/auto-detection
+                          (install, modules, generate-config) Force which root framework to
+                          use instead of the config's root.framework/auto-detection
       ${C_YELLOW}--store gplay|fdroid|izzyondroid|any${C_RESET}
                           (search, add) Which store(s) to search (default: any;
                           izzyondroid is opt-in, not part of "any")
@@ -157,8 +159,17 @@ ${C_BOLD}Config schema:${C_RESET}
                                                 # Magisk modules use the same on-disk format)
     - id: <module id>                          # matches the module's module.prop id= field
       name: <display name>                     # optional, cosmetic only (shown by "modules")
-      enabled: false                           # optional; informational only for now ("modules"
-                                                # is read-only -- see the modules command above)
+      source: github|url|local                  # optional, defaults to github; where to fetch
+                                                 # the module zip from when installing it
+      repo: <owner>/<repo>                       # required when source is github
+      asset: <regex>                              # (github only) selects the release zip;
+                                                   # default: '\\.zip\$'. Must match exactly one
+                                                   # asset, same caveat as apps' asset: above.
+      url: <http(s) URL>                           # required when source is url
+      path: <file, glob, or dir>                   # required when source is local
+      enabled: false                                # optional; informational only for now
+                                                      # (declaroid never enables/disables a module,
+                                                      # only installs it if missing -- see below)
   apps:
     - name: <display name>
       pkg: <package id>
@@ -197,14 +208,20 @@ vice versa. Set up once automatically on first use.
 APKs downloaded from gplay/github/url are cached under ${CACHE_ROOT}/<package-id>/
 so repeated installs don't re-download (see --force-download). fdroid and
 izzyondroid apps are cached by fdroidcl itself; local apps aren't cached
-(nothing to cache).
+(nothing to cache). Module zips (source: github/url) are cached the same
+way, under ${CACHE_ROOT}/modules/<module-id>/.
 
-root/modules management (APatch APModules, Magisk modules) is read-only for
-now: \`modules\` reports drift, nothing installs/enables/disables/uninstalls
-a module. Framework detection (when root.framework isn't set) probes the
-device directly for the apd/magisk CLI, not for either app's package id --
-Magisk supports hiding/repackaging its own app specifically to evade that
-kind of check, so it isn't a reliable signal.
+\`install\` also installs any configured modules that aren't already
+present (github/url/local, same as apps), after a plan+confirm step just
+like apps get. \`modules\` itself stays read-only (drift reporting only).
+Neither ever enables/disables/uninstalls a module, and module state
+changes only take effect on next boot for both frameworks -- declaroid
+never reboots a device on its own, so a "reboot required" reminder is
+printed instead after any module install. Framework detection (when
+root.framework isn't set) probes the device directly for the apd/magisk
+CLI, not for either app's package id -- Magisk supports hiding/
+repackaging its own app specifically to evade that kind of check, so it
+isn't a reliable signal.
 
 Table output (devices, diff, modules) is rendered with tsvtool if it's on
 \$PATH (https://github.com/pschmitt/tsvtool), otherwise with column -t.
@@ -932,6 +949,330 @@ install_url() {
   adb -s "$DEVICE_SERIAL" install -r "${user_args[@]}" "${apks[0]}"
 }
 
+# Module zips are cached separately from app APKs, under their own
+# namespace -- module ids and app package ids are different namespaces
+# and could theoretically collide (unlikely, but not worth risking).
+module_cache_dir_for() {
+  printf '%s/modules/%s\n' "$CACHE_ROOT" "$1"
+}
+
+has_zip_files() {
+  local dir="$1"
+  local -a existing=("$dir"/*.zip)
+
+  [[ -e "${existing[0]}" ]]
+}
+
+# Emits configured modules as one row per module: id, name (defaulted to
+# id), source (defaulted to github), repo, asset (defaulted), url, path --
+# joined with U+00A7, same reasoning as app_rows (see its own comment).
+module_rows() {
+  local config="$1"
+
+  # shellcheck disable=SC2016
+  yq -r '(.modules // [])[] |
+    [.id, (.name // .id), (.source // "github"), (.repo // ""), (.asset // "\\.zip$"), (.url // ""), (.path // "")] | join("§")' "$config"
+}
+
+# Same convention as for_each_app -- see its comment. Calls module_fn (a
+# zero-arg function) once per configured module, with CURRENT_MODULE_ID/
+# CURRENT_MODULE_NAME/CURRENT_MODULE_SOURCE/CURRENT_MODULE_REPO/
+# CURRENT_MODULE_ASSET/CURRENT_MODULE_URL/CURRENT_MODULE_PATH set for it to
+# read. Uses mapfile + a plain for loop, not a `while read < <(...)`, per
+# the ban on that construct elsewhere in this file.
+for_each_module() {
+  local config="$1"
+  local module_fn="$2"
+  local failures=0
+
+  local -a rows
+  mapfile -t rows < <(module_rows "$config")
+
+  local row
+  for row in "${rows[@]}"
+  do
+    # yq -r emits one blank line, not zero output, for `(.modules // [])[]
+    # | ... | join(...)` over an empty/absent modules: list -- confirmed
+    # empirically (only appears once join(...) is the final step; a plain
+    # `.modules[]` alone correctly produces zero output for zero elements).
+    # Without this guard, a modules-less or `modules: []` config would spin
+    # up one phantom iteration with every CURRENT_MODULE_* field empty.
+    [[ -z "$row" ]] && continue
+    IFS='§' read -r CURRENT_MODULE_ID CURRENT_MODULE_NAME CURRENT_MODULE_SOURCE CURRENT_MODULE_REPO CURRENT_MODULE_ASSET CURRENT_MODULE_URL CURRENT_MODULE_PATH <<< "$row"
+
+    if ! "$module_fn"
+    then
+      log_error "$CURRENT_MODULE_NAME ($CURRENT_MODULE_ID) failed"
+      failures=$((failures + 1))
+    fi
+  done
+
+  if [[ $failures -gt 0 ]]
+  then
+    log_error "$failures module(s) failed"
+    return 1
+  fi
+
+  log_ok "All modules processed successfully"
+}
+
+# Resolves CURRENT_MODULE_*'s source into a single local zip file path,
+# ready to push to the device, and prints that path -- downloading/caching
+# under module_cache_dir_for for github/url (mirroring fetch_github_release/
+# install_url's own caching), or just locating the file directly for local
+# (nothing to cache, it's already on disk, same as install_local). The
+# github case reuses fetch_github_release verbatim by shadowing
+# CURRENT_REPO/CURRENT_ASSET as locals first -- that function only ever
+# reads those two (plus the cache_dir argument), so this is the same
+# CURRENT_*-as-dynamic-scope convention already used throughout this file,
+# not a hack. Only ever logs to stderr (via the functions it calls) --
+# the zip path on stdout is the actual return value callers need.
+resolve_module_zip() {
+  local cache_dir
+
+  case "$CURRENT_MODULE_SOURCE" in
+    github)
+      if [[ -z "$CURRENT_MODULE_REPO" ]]
+      then
+        log_error "$CURRENT_MODULE_ID uses source: github but has no 'repo' set"
+        return 1
+      fi
+
+      cache_dir="$(module_cache_dir_for "$CURRENT_MODULE_ID")"
+
+      if [[ -n "$FORCE_DOWNLOAD" ]] || ! has_zip_files "$cache_dir"
+      then
+        mkdir -p "$cache_dir"
+        rm -f "$cache_dir"/*.zip
+
+        local CURRENT_REPO="$CURRENT_MODULE_REPO"
+        local CURRENT_ASSET="$CURRENT_MODULE_ASSET"
+        if ! fetch_github_release "$cache_dir"
+        then
+          return 1
+        fi
+      else
+        log_step "Using cached download in $cache_dir"
+      fi
+      ;;
+    url)
+      if [[ -z "$CURRENT_MODULE_URL" ]]
+      then
+        log_error "$CURRENT_MODULE_ID uses source: url but has no 'url' set"
+        return 1
+      fi
+
+      cache_dir="$(module_cache_dir_for "$CURRENT_MODULE_ID")"
+
+      if [[ -n "$FORCE_DOWNLOAD" ]] || ! has_zip_files "$cache_dir"
+      then
+        mkdir -p "$cache_dir"
+        rm -f "$cache_dir"/*.zip
+
+        local filename
+        filename="$(basename "$CURRENT_MODULE_URL")"
+        [[ "$filename" == *.zip ]] || filename="${CURRENT_MODULE_ID}.zip"
+
+        log_step "Downloading $CURRENT_MODULE_URL"
+        if ! curl --fail --silent --show-error --location --output "${cache_dir}/${filename}" "$CURRENT_MODULE_URL"
+        then
+          log_error "Failed to download $CURRENT_MODULE_URL"
+          return 1
+        fi
+      else
+        log_step "Using cached download in $cache_dir"
+      fi
+      ;;
+    local)
+      local -a zips
+
+      if [[ -z "$CURRENT_MODULE_PATH" ]]
+      then
+        log_error "source: local requires a 'path'"
+        return 1
+      fi
+
+      if [[ -d "$CURRENT_MODULE_PATH" ]]
+      then
+        mapfile -t zips < <(find "$CURRENT_MODULE_PATH" -maxdepth 1 -iname '*.zip' | sort)
+      else
+        mapfile -t zips < <(find "$(dirname -- "$CURRENT_MODULE_PATH")" -maxdepth 1 -name "$(basename -- "$CURRENT_MODULE_PATH")" | sort)
+      fi
+
+      if [[ ${#zips[@]} -ne 1 ]]
+      then
+        log_error "Expected exactly one zip file for '$CURRENT_MODULE_PATH', found ${#zips[@]}"
+        return 1
+      fi
+
+      printf '%s\n' "${zips[0]}"
+      return 0
+      ;;
+    *)
+      log_error "Unknown module source '$CURRENT_MODULE_SOURCE' for $CURRENT_MODULE_ID (expected github, url, or local)"
+      return 1
+      ;;
+  esac
+
+  local -a zips
+  mapfile -t zips < <(find "$cache_dir" -maxdepth 1 -iname '*.zip')
+
+  if [[ ${#zips[@]} -ne 1 ]]
+  then
+    log_error "Expected exactly one cached zip in $cache_dir, found ${#zips[@]}"
+    return 1
+  fi
+
+  printf '%s\n' "${zips[0]}"
+}
+
+# True if $2 has a module directory on $1, regardless of enabled/disabled
+# state -- same "is it installed at all" semantics as is_installed for
+# apps, not "is it currently active".
+is_module_installed() {
+  local device="$1"
+  local module_id="$2"
+
+  [[ -n "$(run_root_shell "$device" "[ -d /data/adb/modules/$module_id ] && echo yes")" ]]
+}
+
+# Pushes $2 (a local zip file path) to $1 and runs the framework-specific
+# module install command through a root shell. run_root_shell's exit
+# status here genuinely reflects the remote apd/magisk command's own exit
+# code (confirmed against a real device for both the success and failure
+# case -- a bad/non-module zip gave a real non-zero exit and an error
+# message on stdout, not silence): the pipeline it runs (`adb shell ... |
+# tr -d '\r'`) reports that correctly under this script's `pipefail` even
+# though it's piped through tr, since pipefail reports the *last command
+# that actually failed*, not just the rightmost stage. Given a 60s
+# timeout, longer than run_root_shell's 15s default for quick probes --
+# extracting/running a module's install scripts can genuinely take longer
+# than a `command -v`/`module list` round trip. Cleans up the pushed temp
+# file regardless of outcome.
+install_module_zip() {
+  local device="$1"
+  local zip_path="$2"
+  local framework="$3"
+  local remote_path output rc=0
+  remote_path="/data/local/tmp/declaroid-module-$(basename "$zip_path")"
+
+  if ! adb -s "$device" push "$zip_path" "$remote_path" >/dev/null 2>&1
+  then
+    log_error "Failed to push $zip_path to $device"
+    return 1
+  fi
+
+  case "$framework" in
+    apatch)
+      output="$(run_root_shell "$device" "apd module install $remote_path" 60)" || rc=$?
+      ;;
+    magisk)
+      output="$(run_root_shell "$device" "magisk --install-module $remote_path" 60)" || rc=$?
+      ;;
+    *)
+      log_error "Unknown root framework '$framework' (expected apatch or magisk)"
+      rc=1
+      ;;
+  esac
+
+  adb -s "$device" shell "rm -f $remote_path" >/dev/null 2>&1
+
+  if [[ $rc -ne 0 ]]
+  then
+    log_error "Module install failed:"
+    printf '%s\n' "$output" >&2
+    return 1
+  fi
+}
+
+# Reads its per-module inputs from CURRENT_MODULE_* (set by
+# for_each_module's read loop) and its run-wide context from
+# DEVICE_SERIAL/DRY_RUN/FORCE_DOWNLOAD/ROOT_FRAMEWORK/VERBOSE (set once per
+# device by cmd_install before calling for_each_module) -- same convention
+# as install_app. Increments the run-wide MODULES_INSTALLED_COUNT on a
+# genuinely new install (not on skip), so cmd_install can print a single
+# "reboot required" reminder at the end instead of one per module.
+install_module_app() {
+  local rc=0
+
+  if is_module_installed "$DEVICE_SERIAL" "$CURRENT_MODULE_ID"
+  then
+    [[ -n "$VERBOSE" ]] && log_skip "$CURRENT_MODULE_NAME ($CURRENT_MODULE_ID) already installed"
+    return 0
+  fi
+
+  log_step "Installing module $CURRENT_MODULE_NAME ($CURRENT_MODULE_ID) [$CURRENT_MODULE_SOURCE]"
+
+  if [[ -n "$DRY_RUN" ]]
+  then
+    printf '  would install %s via %s\n' "$CURRENT_MODULE_ID" "$CURRENT_MODULE_SOURCE"
+    return 0
+  fi
+
+  local zip_path
+  if ! zip_path="$(resolve_module_zip)"
+  then
+    return 1
+  fi
+
+  if install_module_zip "$DEVICE_SERIAL" "$zip_path" "$ROOT_FRAMEWORK"
+  then
+    log_ok "$CURRENT_MODULE_NAME ($CURRENT_MODULE_ID) installed"
+    MODULES_INSTALLED_COUNT=$((MODULES_INSTALLED_COUNT + 1))
+  else
+    rc=1
+  fi
+
+  return "$rc"
+}
+
+# Same idea as build_install_plan, but for modules -- see its comment.
+build_module_plan() {
+  local config="$1"
+  MODULE_PLAN_PENDING=()
+  MODULE_PLAN_SKIP_COUNT=0
+
+  local -a rows
+  mapfile -t rows < <(module_rows "$config")
+
+  local row id name source rest
+  for row in "${rows[@]}"
+  do
+    # See for_each_module's comment on the same guard.
+    [[ -z "$row" ]] && continue
+    IFS='§' read -r id name source rest <<< "$row"
+
+    if is_module_installed "$DEVICE_SERIAL" "$id"
+    then
+      MODULE_PLAN_SKIP_COUNT=$((MODULE_PLAN_SKIP_COUNT + 1))
+    else
+      MODULE_PLAN_PENDING+=("$name"$'\t'"$id"$'\t'"$source")
+    fi
+  done
+}
+
+# Same idea as print_install_plan, but for modules -- see its comment.
+print_module_plan() {
+  local device="$1"
+  local p name id source
+
+  {
+    printf '%sModule install plan for %s:%s %d module(s) to install' \
+      "$C_BOLD" "$device" "$C_RESET" "${#MODULE_PLAN_PENDING[@]}"
+    if [[ "$MODULE_PLAN_SKIP_COUNT" -gt 0 ]]
+    then
+      printf ' (%d already installed)' "$MODULE_PLAN_SKIP_COUNT"
+    fi
+    printf '\n'
+
+    for p in "${MODULE_PLAN_PENDING[@]}"
+    do
+      IFS=$'\t' read -r name id source <<< "$p"
+      printf '  %s (%s) [%s%s%s]\n' "$name" "$id" "$C_CYAN" "$source" "$C_RESET"
+    done
+  } >&2
+}
+
 # Reads its per-app inputs from CURRENT_NAME/CURRENT_PKG/CURRENT_STORE/
 # CURRENT_REPO/CURRENT_ASSET/CURRENT_PATH/CURRENT_PROFILE/CURRENT_URL (set
 # by for_each_app's read loop) and its run-wide context from
@@ -1043,6 +1384,12 @@ for_each_app() {
 
   while IFS='§' read -r CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE CURRENT_URL <&3
   do
+    # yq -r emits one blank line, not zero output, for `.apps[] | ... |
+    # join(...)` over an empty/absent apps: list (same quirk documented on
+    # for_each_module) -- skip the phantom all-empty-fields iteration this
+    # would otherwise cause.
+    [[ -z "$CURRENT_PKG" ]] && continue
+
     if ! "$app_fn"
     then
       log_error "$CURRENT_NAME ($CURRENT_PKG) failed"
@@ -1081,6 +1428,8 @@ build_install_plan() {
   local row name pkg store rest
   for row in "${rows[@]}"
   do
+    # See for_each_app's comment on the same guard.
+    [[ -z "$row" ]] && continue
     IFS='§' read -r name pkg store rest <<< "$row"
 
     if is_installed "$DEVICE_SERIAL" "$pkg"
@@ -1123,6 +1472,7 @@ cmd_install() {
   local bulk=""
   local enforce=""
   local assume_yes=""
+  local cli_root_framework=""
 
   while [[ -n "${1:-}" ]]
   do
@@ -1163,6 +1513,10 @@ cmd_install() {
         bulk=1
         shift
         ;;
+      --root-framework)
+        cli_root_framework="$2"
+        shift 2
+        ;;
       *)
         log_error "Unknown option: $1"
         usage >&2
@@ -1170,6 +1524,15 @@ cmd_install() {
         ;;
     esac
   done
+
+  case "$cli_root_framework" in
+    ""|apatch|magisk)
+      ;;
+    *)
+      log_error "Invalid --root-framework value: $cli_root_framework (expected apatch or magisk)"
+      return 2
+      ;;
+  esac
 
   check_deps adb yq sha256sum
 
@@ -1223,9 +1586,27 @@ cmd_install() {
     check_deps curl
   fi
 
-  local DEVICE_SERIAL TARGET_USER overall_rc=0
-  local -a PLAN_PENDING
-  local PLAN_SKIP_COUNT
+  local -a configured_module_ids module_sources
+  mapfile -t configured_module_ids < <(yq -r '(.modules // [])[].id' "$config")
+
+  if [[ ${#configured_module_ids[@]} -gt 0 ]]
+  then
+    mapfile -t module_sources < <(yq -r '(.modules // [])[] | (.source // "github")' "$config" | sort -u)
+
+    if printf '%s\n' "${module_sources[@]}" | grep -qx github
+    then
+      check_deps curl jq
+    fi
+
+    if printf '%s\n' "${module_sources[@]}" | grep -qx url
+    then
+      check_deps curl
+    fi
+  fi
+
+  local DEVICE_SERIAL TARGET_USER ROOT_FRAMEWORK overall_rc=0
+  local -a PLAN_PENDING MODULE_PLAN_PENDING
+  local PLAN_SKIP_COUNT MODULE_PLAN_SKIP_COUNT MODULES_INSTALLED_COUNT=0
   for DEVICE_SERIAL in "${devices[@]}"
   do
     log_step "Target device: $DEVICE_SERIAL"
@@ -1260,11 +1641,53 @@ cmd_install() {
       fi
     fi
 
+    if [[ ${#configured_module_ids[@]} -gt 0 ]]
+    then
+      if ! ROOT_FRAMEWORK="$(resolve_root_framework "$config" "$cli_root_framework" "$DEVICE_SERIAL")"
+      then
+        log_ok "Root not enabled/detected on $DEVICE_SERIAL, skipping configured module(s)"
+      else
+        build_module_plan "$config"
+
+        if [[ ${#MODULE_PLAN_PENDING[@]} -eq 0 ]]
+        then
+          log_ok "Nothing to install on $DEVICE_SERIAL ($MODULE_PLAN_SKIP_COUNT module(s) already installed)"
+        else
+          print_module_plan "$DEVICE_SERIAL"
+
+          local module_proceed=1
+          if [[ -z "$DRY_RUN" && -z "$assume_yes" ]]
+          then
+            local module_reply
+            read -rp "Install these ${#MODULE_PLAN_PENDING[@]} module(s) on $DEVICE_SERIAL? [y/N] " module_reply
+            case "$module_reply" in
+              y|Y|yes|YES)
+                ;;
+              *)
+                log_step "Skipping module install on $DEVICE_SERIAL"
+                module_proceed=""
+                ;;
+            esac
+          fi
+
+          if [[ -n "$module_proceed" ]] && ! for_each_module "$config" install_module_app
+          then
+            overall_rc=1
+          fi
+        fi
+      fi
+    fi
+
     if [[ -n "$enforce" ]] && ! enforce_config "$config" "$DEVICE_SERIAL" "$DRY_RUN" "$assume_yes"
     then
       overall_rc=1
     fi
   done
+
+  if [[ "$MODULES_INSTALLED_COUNT" -gt 0 ]]
+  then
+    log_warn "$MODULES_INSTALLED_COUNT module(s) installed -- reboot the device(s) for changes to take effect"
+  fi
 
   return "$overall_rc"
 }
@@ -2285,6 +2708,9 @@ cmd_diff() {
       {
         while IFS='§' read -r CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE CURRENT_URL <&3
         do
+          # See for_each_app's comment on the same guard.
+          [[ -z "$CURRENT_PKG" ]] && continue
+
           if is_installed "$DEVICE_SERIAL" "$CURRENT_PKG"
           then
             printf '%s\t%s\t%s\tinstalled\n' "$CURRENT_NAME" "$CURRENT_PKG" "$CURRENT_STORE"
@@ -2591,11 +3017,15 @@ yaml_quote_scalar() {
 # timeout since, unlike every other adb call in this script, this one can
 # genuinely hang forever if root was never granted to Shell and the
 # framework's app is sitting on an unanswered superuser prompt on-screen.
+# $3 overrides the default 15s timeout -- too short for an actual module
+# install (extracting/running a module's own scripts can take longer than
+# a quick `command -v`/`module list` probe).
 run_root_shell() {
   local device="$1"
   local cmd="$2"
+  local secs="${3:-15}"
 
-  timeout 15 adb -s "$device" shell "su -c '$cmd'" </dev/null 2>/dev/null | tr -d '\r'
+  timeout "$secs" adb -s "$device" shell "su -c '$cmd'" </dev/null 2>/dev/null | tr -d '\r'
 }
 
 # Prints "apatch" or "magisk" (whichever's CLI binary is reachable through

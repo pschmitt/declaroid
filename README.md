@@ -126,10 +126,10 @@ $ declaroid COMMAND [OPTIONS]
 
 | Command | Description |
 |---|---|
-| `install` | Download (if not already cached) and install configured apps (shows a plan, prompts to confirm) |
+| `install` | Download (if not already cached) and install configured apps and root modules (shows a plan, prompts to confirm) |
 | `uninstall` | Uninstall configured apps (no download) |
 | `diff` | Show which configured apps are installed vs missing, no changes made (`--full`: also list device apps not in the config) |
-| `modules` | Show configured root modules (APatch/Magisk) vs what's on the device, read-only (`--full`: also list device modules not in the config) |
+| `modules` | Show configured root modules (APatch/Magisk) vs what's on the device, read-only (`--full`: also list device modules not in the config; `install` actually installs a missing one) |
 | `search QUERY` | Search Google Play and/or F-Droid; no device or config needed |
 | `add QUERY` | Search, then append the picked app to the config (fzf picker if more than one match) |
 | `devices`, `list` | List connected adb devices (serial, model, codename, connection) |
@@ -303,12 +303,17 @@ Tricky Store                  tricky_store      v1.4.1           yes      instal
 ```
 
 `--full` also lists installed-but-unconfigured modules as `extra`, same as
-`diff --full` does for apps. **Nothing installs, enables, disables, or
-uninstalls a module** -- that's deliberately out of scope for now: module
-state changes only take effect on next boot for both frameworks, and
-APatch's own CLI `module install` has a documented failure mode the GUI
-app doesn't hit ([bmax121/APatch#633](https://github.com/bmax121/APatch/issues/633)),
-neither of which this has a good answer for yet.
+`diff --full` does for apps. `modules` itself never installs/enables/
+disables/uninstalls anything -- it's read-only drift reporting. To
+actually install a missing module, run `install`: it fetches and installs
+any configured module that isn't already present, the same way it does
+for apps (a plan first, then a confirmation prompt, skippable with
+`-y`/`--yes`/`--noconfirm`/`--no-confirm`, previewable with `--dry-run`).
+**declaroid never enables/disables/uninstalls a module, and module state
+changes only take effect on next boot for both frameworks** -- it doesn't
+reboot the device for you either, so a `WRN ... reboot the device(s) for
+changes to take effect` reminder is printed instead after any module
+install.
 
 Config schema:
 
@@ -319,11 +324,20 @@ root:
                          # APatch or Magisk at all.
   framework: apatch|magisk  # optional; skips auto-detection if you already know.
                              # --root-framework overrides both of these, for a
-                             # single invocation (also works with generate-config).
+                             # single invocation (also works with generate-config
+                             # and install).
 modules:
-  - id: <module id>      # matches the module's module.prop id= field
-    name: <display name>  # optional, cosmetic only
-    enabled: false         # optional, informational only for now
+  - id: <module id>       # matches the module's module.prop id= field
+    name: <display name>   # optional, cosmetic only
+    source: github|url|local  # optional, defaults to github -- where `install`
+                               # fetches the module zip from
+    repo: <owner>/<repo>        # required when source is github
+    asset: <regex>               # (github only) selects the release zip;
+                                  # default '\.zip$', same multi-asset caveat
+                                  # as apps' asset: (see below)
+    url: <http(s) URL>            # required when source is url
+    path: <file, glob, or dir>     # required when source is local
+    enabled: false                 # optional, informational only for now
 ```
 
 Framework detection (when `root.framework` isn't set) probes the device
@@ -337,6 +351,21 @@ packages com.topjohnwu.magisk` found nothing).
 detected, the generated config gets a `root:` section and a `modules:`
 list seeded from whatever's actually installed (skipped entirely for a
 non-rooted device -- no empty `root:`/`modules:` clutter).
+
+```console
+$ declaroid install
+INF Target device: 10.5.0.159:37819
+OK Nothing to install on 10.5.0.159:37819 (30 already installed)
+Module install plan for 10.5.0.159:37819: 1 module(s) to install
+  Play Integrity Fix [INJECT] (playintegrityfix) [github]
+Install these 1 module(s) on 10.5.0.159:37819? [y/N] y
+INF Installing module Play Integrity Fix [INJECT] (playintegrityfix) [github]
+INF Using latest release for KOWX712/PlayIntegrityFix
+INF Downloading PlayIntegrityFix_v4.7-1-inject-s.zip
+OK Play Integrity Fix [INJECT] (playintegrityfix) installed
+OK All modules processed successfully
+WRN 1 module(s) installed -- reboot the device(s) for changes to take effect
+```
 
 ### Stores
 

@@ -87,7 +87,8 @@ _declaroid() {
             '(-f --force-download)'{-f,--force-download}'[Re-download even if a cached copy exists]' \
             '--enforce[Also uninstall device apps that are not in the config]' \
             '(-y --yes --noconfirm --no-confirm)'{-y,--yes,--noconfirm,--no-confirm}'[Skip the install/--enforce confirmation prompts]' \
-            '(-v --verbose)'{-v,--verbose}'[Log each already-installed app skipped, not just a count]'
+            '(-v --verbose)'{-v,--verbose}'[Log each already-installed app skipped, not just a count]' \
+            '--root-framework[Force which root framework to use]:framework:(apatch magisk)'
           ;;
         uninstall)
           _declaroid_common_args \

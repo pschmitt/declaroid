@@ -420,14 +420,59 @@ incomplete change, not a follow-up.
   bug has shown up in this file (see the `asset: ''` and the `§`-vs-tab
   entries above): jq/yq's `//` cannot distinguish "present but falsy"
   from "absent," so never reach for it when that distinction matters.
-- Deliberately no install/enable/disable/uninstall support yet --
-  `cmd_modules` is read-only (drift reporting only, same shape as
-  `cmd_diff`). Two open problems stand in the way of going further: module
+- `cmd_modules` stays read-only (drift reporting only, same shape as
+  `cmd_diff`) -- but `install` *does* install missing modules now (see
+  below). Still deliberately no enable/disable/uninstall support: module
   state changes only take effect on next boot for both frameworks (no
-  reboot orchestration exists in this codebase), and APatch's own CLI
-  `module install` has a documented failure mode
+  reboot orchestration exists in this codebase -- a `WRN ... reboot
+  required` reminder is printed instead), and APatch's own CLI `module
+  install` has a documented failure mode
   ([bmax121/APatch#633](https://github.com/bmax121/APatch/issues/633))
-  that its GUI app doesn't hit, with no known root cause.
+  that its GUI app doesn't hit, with no known root cause -- untested here
+  since both real installs done while building this were against a Magisk
+  device, not APatch; be extra careful testing the APatch install path.
+- **`fetch_github_release` is reused verbatim for modules, not
+  duplicated** -- `resolve_module_zip`'s `github` branch shadows
+  `CURRENT_REPO`/`CURRENT_ASSET` as locals from `CURRENT_MODULE_REPO`/
+  `CURRENT_MODULE_ASSET` right before calling it. This works because
+  `fetch_github_release` only ever reads those two globals (plus a
+  `cache_dir` argument) -- it has no `.apk`-specific assumption baked in
+  anywhere in its own body, the `.apk`/`.zip` default is entirely a
+  property of what `app_rows`/`module_rows` default `CURRENT_ASSET`/
+  `CURRENT_MODULE_ASSET` to when the config doesn't set one. Same
+  CURRENT_*-as-dynamic-scope convention already used throughout this file,
+  just shadowed one level deeper than usual.
+- **`run_root_shell`'s exit status genuinely reflects the remote apd/
+  magisk command's own exit code**, confirmed against a real device for
+  both outcomes (a real module install: exit 0, stdout showing install
+  progress; a deliberately corrupt/non-module zip: exit 1, `magisk`'s own
+  `! This zip is not a Magisk module!` on stdout) -- even though the
+  function pipes through `tr -d '\r'`. This isn't an accident: this
+  script runs under `set -o pipefail`, which reports the exit status of
+  the *last command in the pipeline that actually failed*, not simply the
+  rightmost stage -- since `tr` essentially never fails, a failing `adb
+  shell` stage still wins. Relied on directly in `install_module_zip`
+  (`output="$(run_root_shell ...)" || rc=$?`) instead of re-deriving
+  success from output text.
+- `run_root_shell` takes an optional third argument overriding its
+  default 15s timeout -- too short for an actual module install
+  (extracting/running a module's own scripts can take longer than a quick
+  `command -v`/`module list` probe); `install_module_zip` passes 60.
+- **`yq -r` emits one blank line, not zero output, for `(.foo // [])[] |
+  ... | join(...)` over an empty/absent list** -- confirmed empirically
+  and it's specifically about `join(...)` being the final step: `.apps[]`
+  (or `.modules[]`) alone over `[]` correctly produces zero output, but
+  piping that through `[...] | join("§")` produces exactly one blank
+  line instead of nothing. Every row-consuming loop over `app_rows`/
+  `module_rows` (`for_each_app`, `for_each_module`, `build_install_plan`,
+  `build_module_plan`, `cmd_diff`) now guards against this (`[[ -z "$row"
+  ]] && continue` or equivalent on the parsed pkg/id) -- without it, an
+  `apps: []` or `modules: []` (or omitted key entirely) config spins up
+  one phantom iteration with every CURRENT_* field empty. This was a
+  latent bug in the pre-existing app-side functions too, only surfaced by
+  actually testing a modules-only config (`apps: []`) while building this
+  feature -- worth remembering for any *other* `(.x // [])[] | ... |
+  join(...)` pattern added later.
 
 ## Nix packaging
 
