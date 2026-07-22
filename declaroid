@@ -195,6 +195,21 @@ ${C_BOLD}Config schema:${C_RESET}
                                      # entry at all). Unset means: use whatever the
                                      # device reports as its current profile --
                                      # never defaults to "all".
+      state:                        # optional
+        installed: true|false        # optional, default true. false means this
+                                       # app is *not* desired: apply skips
+                                       # installing it and uninstalls it if it's
+                                       # present, unconditionally (no --enforce
+                                       # needed -- it's an explicit per-app
+                                       # choice, unlike --enforce's "anything
+                                       # undeclared").
+        disabled: true|false          # optional, default false. true means
+                                       # apply installs it if missing, then
+                                       # disables it (pm disable-user) --
+                                       # "present but dormant", not "don't
+                                       # install". Flipping it back to
+                                       # false/unset re-enables it (pm enable)
+                                       # on the next apply.
 
 github releases are queried via the GitHub API; set \$GITHUB_TOKEN to raise
 the unauthenticated rate limit or access private repos. If a repo has no
@@ -473,6 +488,19 @@ is_installed() {
   local pkg="$2"
 
   adb -s "$device" shell pm list packages "$pkg" </dev/null 2>/dev/null \
+    | tr -d '\r' \
+    | grep -qx "package:$pkg"
+}
+
+# Same idea as is_installed, but scoped to disabled packages only (`pm list
+# packages -d`) -- a disabled package is still "installed" per is_installed
+# above (that query has no -d/-e filter), this just distinguishes the
+# enabled/disabled sub-state for state.disabled: convergence.
+is_pkg_disabled() {
+  local device="$1"
+  local pkg="$2"
+
+  adb -s "$device" shell pm list packages -d "$pkg" </dev/null 2>/dev/null \
     | tr -d '\r' \
     | grep -qx "package:$pkg"
 }
@@ -1277,58 +1305,128 @@ print_module_plan() {
   } >&2
 }
 
+# Converges the device's enabled/disabled state for CURRENT_PKG to match
+# CURRENT_STATE_DISABLED ("true"/"false", from `state.disabled:` in the
+# config) via `pm disable-user`/`pm enable` -- picked over `pm archive`
+# since archive/unarchive depends on the installer supporting an unarchive
+# request, which isn't a safe assumption for github/local/url-sourced apps
+# (only really solid for gplay). Symmetric: also re-enables a currently
+# disabled app when the config no longer wants it disabled, so flipping
+# `state.disabled` back to false/absent converges the device back, not just
+# the true direction. Reads/writes CURRENT_NAME/CURRENT_PKG/DEVICE_SERIAL/
+# DRY_RUN like install_app's other helpers.
+sync_app_disabled_state() {
+  local currently_disabled=""
+  is_pkg_disabled "$DEVICE_SERIAL" "$CURRENT_PKG" && currently_disabled=1
+
+  if [[ "$CURRENT_STATE_DISABLED" == true ]]
+  then
+    [[ -n "$currently_disabled" ]] && return 0
+
+    log_step "Disabling $CURRENT_NAME ($CURRENT_PKG)"
+
+    if [[ -n "$DRY_RUN" ]]
+    then
+      printf '  would disable %s\n' "$CURRENT_PKG"
+      return 0
+    fi
+
+    if adb -s "$DEVICE_SERIAL" shell pm disable-user "$CURRENT_PKG" </dev/null >/dev/null 2>&1
+    then
+      log_ok "$CURRENT_NAME ($CURRENT_PKG) disabled"
+    else
+      log_error "Failed to disable $CURRENT_NAME ($CURRENT_PKG)"
+      return 1
+    fi
+  else
+    [[ -z "$currently_disabled" ]] && return 0
+
+    log_step "Enabling $CURRENT_NAME ($CURRENT_PKG)"
+
+    if [[ -n "$DRY_RUN" ]]
+    then
+      printf '  would enable %s\n' "$CURRENT_PKG"
+      return 0
+    fi
+
+    if adb -s "$DEVICE_SERIAL" shell pm enable "$CURRENT_PKG" </dev/null >/dev/null 2>&1
+    then
+      log_ok "$CURRENT_NAME ($CURRENT_PKG) enabled"
+    else
+      log_error "Failed to enable $CURRENT_NAME ($CURRENT_PKG)"
+      return 1
+    fi
+  fi
+}
+
 # Reads its per-app inputs from CURRENT_NAME/CURRENT_PKG/CURRENT_STORE/
-# CURRENT_REPO/CURRENT_ASSET/CURRENT_PATH/CURRENT_PROFILE/CURRENT_URL (set
-# by for_each_app's read loop) and its run-wide context from
-# DEVICE_SERIAL/DRY_RUN/FORCE_DOWNLOAD/TARGET_USER (set by cmd_install
-# before calling for_each_app). See AGENTS.md for why -- this replaced a
-# positional-argument chain that kept growing every time a store needed one
-# more piece of config.
+# CURRENT_REPO/CURRENT_ASSET/CURRENT_PATH/CURRENT_PROFILE/CURRENT_URL/
+# CURRENT_STATE_INSTALLED/CURRENT_STATE_DISABLED (set by for_each_app's read
+# loop) and its run-wide context from DEVICE_SERIAL/DRY_RUN/FORCE_DOWNLOAD/
+# TARGET_USER (set by cmd_apply before calling for_each_app). See AGENTS.md
+# for why -- this replaced a positional-argument chain that kept growing
+# every time a store needed one more piece of config.
+#
+# `state.installed: false` apps are skipped entirely here (return 0
+# immediately, no log line) -- they're handled by build_removal_plan/
+# cmd_apply's removal pass instead, not this one. Otherwise, once installed
+# (or already present), state.disabled: is converged via
+# sync_app_disabled_state -- "install it, then disable" is deliberate: a
+# disabled app is still a *present* app, just dormant, not "don't bother
+# installing it".
 install_app() {
   local rc=0
+
+  if [[ "$CURRENT_STATE_INSTALLED" == false ]]
+  then
+    return 0
+  fi
 
   if is_installed "$DEVICE_SERIAL" "$CURRENT_PKG"
   then
     [[ -n "$VERBOSE" ]] && log_skip "$CURRENT_NAME ($CURRENT_PKG) already installed"
-    return 0
+  else
+    log_step "Installing $CURRENT_NAME ($CURRENT_PKG) [$CURRENT_STORE]"
+
+    if [[ -n "$DRY_RUN" ]]
+    then
+      printf '  would install %s via %s\n' "$CURRENT_PKG" "$CURRENT_STORE"
+    else
+      case "$CURRENT_STORE" in
+        gplay)
+          install_gplay || rc=$?
+          ;;
+        fdroid)
+          install_fdroid || rc=$?
+          ;;
+        izzyondroid)
+          install_izzyondroid || rc=$?
+          ;;
+        github)
+          install_github || rc=$?
+          ;;
+        local)
+          install_local || rc=$?
+          ;;
+        url)
+          install_url || rc=$?
+          ;;
+        *)
+          log_error "Unknown store '$CURRENT_STORE' for $CURRENT_PKG (expected gplay, fdroid, izzyondroid, github, local, or url)"
+          rc=1
+          ;;
+      esac
+
+      if [[ $rc -eq 0 ]]
+      then
+        log_ok "$CURRENT_NAME ($CURRENT_PKG) installed"
+      fi
+    fi
   fi
-
-  log_step "Installing $CURRENT_NAME ($CURRENT_PKG) [$CURRENT_STORE]"
-
-  if [[ -n "$DRY_RUN" ]]
-  then
-    printf '  would install %s via %s\n' "$CURRENT_PKG" "$CURRENT_STORE"
-    return 0
-  fi
-
-  case "$CURRENT_STORE" in
-    gplay)
-      install_gplay || rc=$?
-      ;;
-    fdroid)
-      install_fdroid || rc=$?
-      ;;
-    izzyondroid)
-      install_izzyondroid || rc=$?
-      ;;
-    github)
-      install_github || rc=$?
-      ;;
-    local)
-      install_local || rc=$?
-      ;;
-    url)
-      install_url || rc=$?
-      ;;
-    *)
-      log_error "Unknown store '$CURRENT_STORE' for $CURRENT_PKG (expected gplay, fdroid, izzyondroid, github, local, or url)"
-      rc=1
-      ;;
-  esac
 
   if [[ $rc -eq 0 ]]
   then
-    log_ok "$CURRENT_NAME ($CURRENT_PKG) installed"
+    sync_app_disabled_state || rc=$?
   fi
 
   return "$rc"
@@ -1360,14 +1458,19 @@ uninstall_app() {
 }
 
 # Emits the configured apps as one row per app: name, pkg, store (defaulted),
-# repo, asset (defaulted), path, profile (defaulted), url -- joined with
+# repo, asset (defaulted), path, profile (defaulted), url, state.installed
+# (defaulted "true"), state.disabled (defaulted "false") -- joined with
 # U+00A7 (SECTION SIGN), not a tab. Several of these fields (repo/asset/
 # path/profile/url) are legitimately empty for most apps, and bash's `read`
 # collapses consecutive *whitespace* IFS delimiters (tab included)
 # regardless of what IFS is set to, silently dropping empty fields and
 # shifting everything after them left by one. Using a non-whitespace,
 # extremely-unlikely-to-appear-in-real-data separator sidesteps that
-# entirely. Shared by for_each_app and cmd_diff.
+# entirely. The two state fields use an explicit `== false`/`== true`
+# comparison, not `//` -- `//` treats an explicit `false` the same as an
+# absent key (see AGENTS.md's `.root.enabled // ""` entry), which would
+# silently discard `state.installed: false`. Shared by for_each_app and
+# cmd_diff.
 app_rows() {
   local config="$1"
 
@@ -1375,18 +1478,19 @@ app_rows() {
   yq -r '(.store // "gplay") as $ds |
     (.profile // "") as $dp |
     .apps[] |
-    [.name, .pkg, (.store // $ds), (.repo // ""), (.asset // "\\.apk$"), (.path // ""), (.profile // $dp), (.url // "")] | join("§")' "$config"
+    [.name, .pkg, (.store // $ds), (.repo // ""), (.asset // "\\.apk$"), (.path // ""), (.profile // $dp), (.url // ""), ((.state.installed == false) | not), (.state.disabled == true)] | join("§")' "$config"
 }
 
 # Calls app_fn (a zero-arg function; see install_app's comment) once per
 # configured app, with CURRENT_NAME/CURRENT_PKG/CURRENT_STORE/CURRENT_REPO/
-# CURRENT_ASSET/CURRENT_PATH/CURRENT_PROFILE/CURRENT_URL set for it to read.
+# CURRENT_ASSET/CURRENT_PATH/CURRENT_PROFILE/CURRENT_URL/
+# CURRENT_STATE_INSTALLED/CURRENT_STATE_DISABLED set for it to read.
 for_each_app() {
   local config="$1"
   local app_fn="$2"
   local failures=0
 
-  while IFS='§' read -r CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE CURRENT_URL <&3
+  while IFS='§' read -r CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE CURRENT_URL CURRENT_STATE_INSTALLED CURRENT_STATE_DISABLED <&3
   do
     # yq -r emits one blank line, not zero output, for `.apps[] | ... |
     # join(...)` over an empty/absent apps: list (same quirk documented on
@@ -1412,15 +1516,18 @@ for_each_app() {
 
 # Read-only pass over the config: populates PLAN_PENDING (tab-separated
 # name/pkg/store rows) with configured apps not yet installed on
-# $DEVICE_SERIAL, and PLAN_SKIP_COUNT with how many already are. Assigns
-# straight into the caller's PLAN_PENDING/PLAN_SKIP_COUNT locals (same
-# dynamic-scoping convention as CURRENT_*/DEVICE_SERIAL elsewhere) rather
-# than being local itself. Never logs anything -- this only builds the plan
-# that print_install_plan then shows once, up front; per-app "already
-# installed" messages are still install_app's job, during the real pass,
-# gated on --verbose there. Uses mapfile + a plain for loop, not a
-# `while read < <(...)`, per the ban on that construct elsewhere in this
-# file (see AGENTS.md).
+# $DEVICE_SERIAL, and PLAN_SKIP_COUNT with how many already are. Apps with
+# `state.installed: false` are skipped entirely here (neither pending nor
+# counted as a skip) -- they're not desired at all, so they're handled by
+# build_removal_plan instead, not this one. Assigns straight into the
+# caller's PLAN_PENDING/PLAN_SKIP_COUNT locals (same dynamic-scoping
+# convention as CURRENT_*/DEVICE_SERIAL elsewhere) rather than being local
+# itself. Never logs anything -- this only builds the plan that
+# print_install_plan then shows once, up front; per-app "already installed"
+# messages are still install_app's job, during the real pass, gated on
+# --verbose there. Uses mapfile + a plain for loop, not a `while read
+# < <(...)`, per the ban on that construct elsewhere in this file (see
+# AGENTS.md).
 build_install_plan() {
   local config="$1"
   PLAN_PENDING=()
@@ -1429,12 +1536,14 @@ build_install_plan() {
   local -a rows
   mapfile -t rows < <(app_rows "$config")
 
-  local row name pkg store rest
+  local row name pkg store _repo _asset _path _profile _url state_installed _state_disabled
   for row in "${rows[@]}"
   do
     # See for_each_app's comment on the same guard.
     [[ -z "$row" ]] && continue
-    IFS='§' read -r name pkg store rest <<< "$row"
+    IFS='§' read -r name pkg store _repo _asset _path _profile _url state_installed _state_disabled <<< "$row"
+
+    [[ "$state_installed" == false ]] && continue
 
     if is_installed "$DEVICE_SERIAL" "$pkg"
     then
@@ -1443,6 +1552,48 @@ build_install_plan() {
       PLAN_PENDING+=("$name"$'\t'"$pkg"$'\t'"$store")
     fi
   done
+}
+
+# Read-only pass over the config: populates REMOVAL_PLAN_PENDING
+# (tab-separated name/pkg rows) with configured apps that have
+# `state.installed: false` but are still actually present on
+# $DEVICE_SERIAL -- the mirror image of build_install_plan, for the apps
+# that are explicitly *not* desired rather than the ones that are.
+build_removal_plan() {
+  local config="$1"
+  REMOVAL_PLAN_PENDING=()
+
+  local -a rows
+  mapfile -t rows < <(app_rows "$config")
+
+  local row name pkg _store _repo _asset _path _profile _url state_installed _state_disabled
+  for row in "${rows[@]}"
+  do
+    [[ -z "$row" ]] && continue
+    IFS='§' read -r name pkg _store _repo _asset _path _profile _url state_installed _state_disabled <<< "$row"
+
+    if [[ "$state_installed" == false ]] && is_installed "$DEVICE_SERIAL" "$pkg"
+    then
+      REMOVAL_PLAN_PENDING+=("$name"$'\t'"$pkg")
+    fi
+  done
+}
+
+# Prints the plan built by build_removal_plan for confirmation. Read-only.
+print_removal_plan() {
+  local device="$1"
+  local p name pkg
+
+  {
+    printf '%sRemoval plan for %s:%s %d app(s) marked state.installed: false but still present\n' \
+      "$C_BOLD" "$device" "$C_RESET" "${#REMOVAL_PLAN_PENDING[@]}"
+
+    for p in "${REMOVAL_PLAN_PENDING[@]}"
+    do
+      IFS=$'\t' read -r name pkg <<< "$p"
+      printf '  %s (%s)\n' "$name" "$pkg"
+    done
+  } >&2
 }
 
 # Prints the plan built by build_install_plan for confirmation. Read-only.
@@ -1614,7 +1765,7 @@ cmd_apply() {
   fi
 
   local DEVICE_SERIAL TARGET_USER ROOT_FRAMEWORK overall_rc=0
-  local -a PLAN_PENDING MODULE_PLAN_PENDING
+  local -a PLAN_PENDING MODULE_PLAN_PENDING REMOVAL_PLAN_PENDING
   local PLAN_SKIP_COUNT MODULE_PLAN_SKIP_COUNT MODULES_INSTALLED_COUNT=0
   for DEVICE_SERIAL in "${devices[@]}"
   do
@@ -1623,13 +1774,13 @@ cmd_apply() {
 
     build_install_plan "$config"
 
+    local proceed=1
     if [[ ${#PLAN_PENDING[@]} -eq 0 ]]
     then
       log_ok "Nothing to install on $DEVICE_SERIAL ($PLAN_SKIP_COUNT already installed)"
     else
       print_install_plan "$DEVICE_SERIAL"
 
-      local proceed=1
       if [[ -z "$DRY_RUN" && -z "$assume_yes" ]]
       then
         local reply
@@ -1643,10 +1794,51 @@ cmd_apply() {
             ;;
         esac
       fi
+    fi
 
-      if [[ -n "$proceed" ]] && ! for_each_app "$config" install_app
+    # Always runs unless the user explicitly declined the prompt above --
+    # install_app also does the state.disabled: convergence (see its
+    # comment) for every already-installed app, not just newly-installed
+    # ones, so this must run even when PLAN_PENDING is empty (nothing left
+    # to *install*, but there may still be an enable/disable to converge).
+    if [[ -n "$proceed" ]] && ! for_each_app "$config" install_app
+    then
+      overall_rc=1
+    fi
+
+    build_removal_plan "$config"
+
+    if [[ ${#REMOVAL_PLAN_PENDING[@]} -gt 0 ]]
+    then
+      print_removal_plan "$DEVICE_SERIAL"
+
+      local removal_proceed=1
+      if [[ -z "$DRY_RUN" && -z "$assume_yes" ]]
       then
-        overall_rc=1
+        local removal_reply
+        read -rp "Uninstall these ${#REMOVAL_PLAN_PENDING[@]} app(s) on $DEVICE_SERIAL? [y/N] " removal_reply
+        case "$removal_reply" in
+          y|Y|yes|YES)
+            ;;
+          *)
+            log_step "Skipping removal on $DEVICE_SERIAL"
+            removal_proceed=""
+            ;;
+        esac
+      fi
+
+      if [[ -n "$removal_proceed" ]]
+      then
+        local removal_row
+        for removal_row in "${REMOVAL_PLAN_PENDING[@]}"
+        do
+          IFS=$'\t' read -r CURRENT_NAME CURRENT_PKG <<< "$removal_row"
+
+          if ! uninstall_app
+          then
+            overall_rc=1
+          fi
+        done
       fi
     fi
 
@@ -2722,7 +2914,7 @@ cmd_diff() {
   local -a devices
   mapfile -t devices <<< "$devices_raw"
 
-  local DEVICE_SERIAL CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE CURRENT_URL
+  local DEVICE_SERIAL CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE CURRENT_URL CURRENT_STATE_INSTALLED CURRENT_STATE_DISABLED
   for DEVICE_SERIAL in "${devices[@]}"
   do
     log_step "Target device: $DEVICE_SERIAL"
@@ -2730,16 +2922,27 @@ cmd_diff() {
     {
       printf 'NAME\tPKG\tSTORE\tSTATUS\n'
       {
-        while IFS='§' read -r CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE CURRENT_URL <&3
+        while IFS='§' read -r CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE CURRENT_URL CURRENT_STATE_INSTALLED CURRENT_STATE_DISABLED <&3
         do
           # See for_each_app's comment on the same guard.
           [[ -z "$CURRENT_PKG" ]] && continue
 
-          if is_installed "$DEVICE_SERIAL" "$CURRENT_PKG"
+          if [[ "$CURRENT_STATE_INSTALLED" == false ]]
           then
-            printf '%s\t%s\t%s\tinstalled\n' "$CURRENT_NAME" "$CURRENT_PKG" "$CURRENT_STORE"
-          else
+            if is_installed "$DEVICE_SERIAL" "$CURRENT_PKG"
+            then
+              printf '%s\t%s\t%s\tunwanted\n' "$CURRENT_NAME" "$CURRENT_PKG" "$CURRENT_STORE"
+            else
+              printf '%s\t%s\t%s\tremoved\n' "$CURRENT_NAME" "$CURRENT_PKG" "$CURRENT_STORE"
+            fi
+          elif ! is_installed "$DEVICE_SERIAL" "$CURRENT_PKG"
+          then
             printf '%s\t%s\t%s\tmissing\n' "$CURRENT_NAME" "$CURRENT_PKG" "$CURRENT_STORE"
+          elif is_pkg_disabled "$DEVICE_SERIAL" "$CURRENT_PKG"
+          then
+            printf '%s\t%s\t%s\tdisabled\n' "$CURRENT_NAME" "$CURRENT_PKG" "$CURRENT_STORE"
+          else
+            printf '%s\t%s\t%s\tinstalled\n' "$CURRENT_NAME" "$CURRENT_PKG" "$CURRENT_STORE"
           fi
         done 3< <(app_rows "$config")
 

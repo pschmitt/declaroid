@@ -548,13 +548,17 @@ survive). If the picked package is already in the config, `add` skips it
 entry's `store:` is only written out if it differs from the config's
 top-level default (same convention as `generate-config`).
 
+Pass `--dry-run`/`-k`/`--dryrun` to print the YAML entry that would be
+appended to stdout instead of actually writing it to the config file.
+
 ### Table output
 
 `declaroid devices`, `declaroid diff`, and `declaroid search` all render as
 a table: using [tsvtool](https://github.com/pschmitt/tsvtool) if it's on
 `$PATH`, falling back to `column -t` (with a bolded header) otherwise.
-`diff` additionally colors `installed` green, `missing` yellow, and (with
-`--full`) `extra` red; `search` colors the STORE column. Both are colored
+`diff` additionally colors `installed` green, `missing` yellow, `disabled`
+cyan, `unwanted` red, `removed` green, and (with `--full`) `extra` red;
+`search` colors the STORE column. Both are colored
 *after* handing off to tsvtool/`column -t`, not before, so alignment is
 never thrown off by invisible color codes. `search` is the one exception
 that needs color/links embedded *before* rendering (each row's OSC 8
@@ -592,13 +596,60 @@ that device -- `--enforce` (below) still runs afterward if requested.
 confirmation, unless `--dry-run` or `-y`/`--yes`/`--noconfirm`/`--no-confirm`
 is given.
 
-### `install --enforce`: removing what's not configured
+### `apply --enforce`: removing what's not configured
 
-`install --enforce` runs the normal install, then -- per device -- finds the
+`apply --enforce` runs the normal install, then -- per device -- finds the
 same "extra" apps `diff --full` would report and offers to uninstall them,
 prompting once for the whole batch (not once per app). Skip the prompt with
 `-y`/`--yes`/`--noconfirm`/`--no-confirm`, or preview it without uninstalling
 anything via `--dry-run`.
+
+Set `enforce: true` at the top level of the config to make this the default
+for that device/config, instead of having to pass `--enforce` every time:
+
+```yaml
+enforce: true
+```
+
+The CLI flag and the config key OR together -- either one is enough to turn
+it on for a given run.
+
+### Per-app `state:` -- not desired, or disabled
+
+Each app entry can have a `state:` block:
+
+```yaml
+apps:
+  - name: Facebook
+    pkg: com.facebook.katana
+    state:
+      disabled: true
+
+  - name: Bloatware I Don't Want Anymore
+    pkg: com.example.bloat
+    state:
+      installed: false
+```
+
+- **`installed: false`** means this app isn't desired at all, even though its
+  entry stays in the config. `apply` skips installing it (it won't show up
+  in the normal install plan) and, if it's already present on the device,
+  uninstalls it -- unconditionally, with its own plan+confirm step, no
+  `--enforce` needed. This is different from `--enforce`'s "anything
+  undeclared": here the app is still explicitly listed, just marked unwanted.
+- **`disabled: true`** means the app should be installed (if missing) and
+  then disabled via `pm disable-user` -- present but dormant, not "don't
+  install". `apply` re-enables it (`pm enable`) if you flip this back to
+  `false` or remove it. `pm disable-user` was chosen over `pm archive`:
+  archiving frees the APK's storage, but un-archiving depends on the
+  installer supporting an unarchive request, which isn't a safe assumption
+  for anything other than `gplay` -- `disable-user` works uniformly
+  regardless of store and is always reversible.
+
+`diff` reflects both: an `installed: false` app shows as `unwanted` (present
+but shouldn't be) or `removed` (correctly absent), and any app actually
+disabled on the device (regardless of what `state.disabled` says) shows as
+`disabled` instead of `installed`.
 
 ## Shell completion
 

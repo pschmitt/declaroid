@@ -473,6 +473,96 @@ incomplete change, not a follow-up.
   actually testing a modules-only config (`apps: []`) while building this
   feature -- worth remembering for any *other* `(.x // [])[] | ... |
   join(...)` pattern added later.
+- **Per-app `state.installed`/`state.disabled` were added as two more
+  trailing `app_rows` fields, not a separate query/loop.** `state.installed:
+  false` means the app isn't desired at all (still listed, just marked
+  unwanted): `build_install_plan` excludes these rows entirely (neither
+  pending nor a skip-count), and a new mirror-image `build_removal_plan`
+  finds the ones still actually present and feeds them through `uninstall_app`
+  via its own plan+confirm step in `cmd_apply` -- deliberately *not* gated
+  behind `--enforce`, since this is an explicit per-app choice, unlike
+  `--enforce`'s "anything undeclared". `install_app` itself also returns
+  immediately for these (it's called unconditionally by `for_each_app`
+  regardless of the plan, same as ever).
+- **`state.disabled: true` converges via `pm disable-user`/`pm enable`, not
+  `pm archive`** -- archiving frees the APK's storage, but un-archiving
+  depends on the installer supporting an unarchive request (confirmed via
+  `pm help` on a real device: both `disable-user` and `archive` exist on
+  SDK 35/36), which is only a safe assumption for `gplay`; `disable-user` is
+  universal across every store this tool supports and always reversible via
+  `pm enable`, so it's the one that doesn't risk stranding a github/local/url
+  app. `sync_app_disabled_state` (called from `install_app`, right after the
+  existing install-or-already-installed branch, only when that branch
+  succeeded) is deliberately symmetric: it re-enables a currently-disabled
+  app when `state.disabled` is false/absent too, not just the disable
+  direction -- otherwise flipping the config back would silently do nothing,
+  which would contradict the "declarative" framing the rest of this tool
+  uses everywhere else. "Install it, then disable" (rather than skipping the
+  install entirely for a disabled-desired app) was a deliberate choice: a
+  disabled app is still a *present* app, just dormant.
+- **`bash -c "$start_cmd"` inside `resolve_devices` must redirect to
+  stderr (`>&2`), confirmed as a real bug against a real device, not just a
+  theoretical risk.** `resolve_devices`'s own return value is captured via
+  `$(...)` by every caller (see the "log to stderr, data to stdout" rule
+  above) -- `start_cmd` is an arbitrary, user-supplied shell command, and a
+  real one (`zhj adb::connect <host>`, which calls out to a Home
+  Assistant/Tasker intent) printed a stray JSON `[]` to stdout as a side
+  effect. Without the redirect, that line silently became part of the
+  "connected device" list this function returns, and the device serial
+  downstream code tried to use ended up literally being the string `[]`
+  -- every subsequent `adb -s '[]' ...` call then failed silently (stderr
+  discarded, per existing convention), so the whole run proceeded as if
+  every configured app were missing, no error surfaced anywhere. Only
+  caught by testing against a real disconnected device with a real
+  `start_cmd`, not by reasoning about it or dry-running.
+- **`adb.start_cmd` retries device resolution exactly once, never loops.**
+  `resolve_devices` tries discovery/matching as-is first; only if that comes
+  up completely empty (no devices at all, or none matching the query) *and*
+  `adb.start_cmd` is set does it run the command (`bash -c`) and try again --
+  capped at one retry by construction (a `for attempt in 1 2` loop, not a
+  `while`), so a `start_cmd` that doesn't actually fix the connection fails
+  exactly the same way it would without one configured, just slower by
+  however long the command takes. Deliberately just an arbitrary shell
+  string, not a structured "connect to host:port" field -- real-world
+  start commands vary (plain `adb connect host:port`, `zhj adb::connect
+  <host>` which itself nmap-scans for the currently-listening port *and*
+  can trigger a Home Assistant/Tasker intent to enable wireless adb first),
+  and trying to model that structurally would just end up re-inventing
+  shell.
+- `enforce: true` in the config and `--enforce` on the CLI OR together in
+  `cmd_apply` -- reads `.enforce == true` from the config right after the
+  config-file-exists check, only when the CLI flag wasn't already given (no
+  point querying yq if it's already on). Same `== true` (not `//`)
+  convention as every other optional boolean field in this file.
+- **`-k`/`--dry-run`/`--dryrun` is accepted by every subcommand now, not
+  just `apply`/`uninstall`.** Real behavior for the ones that mutate
+  something (`apply`, `uninstall`, `clear-cache`, `add`, `generate-config`
+  with `-o`); a parsed-but-ignored no-op for the ones that were already
+  read-only (`devices`, `diff`, `modules`, `search`) so a script that always
+  passes `-k`/`--dry-run` doesn't have to know which subcommand it's
+  calling. `add --dry-run` prints the YAML entry it would append to stdout
+  (real data output, not a log line) instead of running the `yq -i`
+  mutation -- computed the same way the fzf preview script already renders
+  it (double-quoted name, `store:` only when it differs from the config's
+  default), just without the ANSI/preview-script machinery.
+- **`adb.stop_cmd`/`adb.auto_stop` are the teardown mirror of
+  `adb.start_cmd`, via a shared `maybe_run_adb_stop_cmd` helper called at
+  the end of `cmd_apply`/`cmd_uninstall`/`cmd_diff`/`cmd_modules`** (every
+  command that resolves a device via a real config path -- `cmd_generate_config`
+  passes `resolve_devices` an empty config string, so `adb.start_cmd`
+  doesn't apply there either; consistent to skip `stop_cmd` there too).
+  Deliberately best-effort/fire-and-forget: a failing `stop_cmd` only logs,
+  it never flips the calling command's own exit status -- disconnecting
+  wireless adb again is cleanup, not something worth failing an otherwise-
+  successful run over. `auto_stop` defaults to `false` so a bare
+  `start_cmd` (no `auto_stop`) never disconnects anything on its own --
+  it's opt-in on both ends, not implied by having `start_cmd` set.
+  `cmd_diff`/`cmd_modules` didn't previously track a real `DRY_RUN` local
+  (their `-k`/`--dry-run`/`--dryrun` case was a parsed-but-ignored no-op,
+  added when that flag went global) -- upgraded to a genuine local so
+  `maybe_run_adb_stop_cmd` can respect it there too (preview only, don't
+  actually run `stop_cmd`), same as it already does in `cmd_apply`/
+  `cmd_uninstall`.
 
 ## Nix packaging
 

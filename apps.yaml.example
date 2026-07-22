@@ -41,3 +41,18 @@ apps:
     pkg: com.microsoft.windowsintune.companyportal
     # Only this one app needs to land in the Work Profile too.
     profile: all
+
+  - name: Facebook
+    pkg: com.facebook.katana
+    # Keep it around (data/settings preserved) but disabled -- apply installs
+    # it if missing, then runs `pm disable-user` on it. Flip this back to
+    # false/remove it to have apply re-enable it again.
+    state:
+      disabled: true
+
+  - name: Bloatware I Don't Want Anymore
+    pkg: com.example.bloat
+    # Not desired at all -- apply uninstalls it if present, unconditionally
+    # (unlike --enforce, this doesn't require anything else in the config).
+    state:
+      installed: false
