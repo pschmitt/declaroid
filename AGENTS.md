@@ -689,6 +689,82 @@ incomplete change, not a follow-up.
   actually run `stop_cmd`), same as it already does in `cmd_apply`/
   `cmd_uninstall`.
 
+## Obtainium repo tracking (`obtainium:`)
+
+- **Schema reverse-engineered from Obtainium's own Dart source, not
+  guessed** -- `class App`'s `fromJson` (`lib/providers/source_provider.dart`)
+  casts `id`/`url`/`author`/`name`/`additionalSettings` directly (throws
+  `TypeError` if any is missing or the wrong type); everything else
+  (`latestVersion`, `apkUrls`, `preferredApkIndex`, `pinned`, ...) has an
+  in-code default and can be omitted. `additionalSettings` must itself be a
+  JSON-encoded *string* (decoded via `jsonDecode` inside `fromJson`), not a
+  nested object -- `jq`'s `| tojson` on the `settings:` config key handles
+  that. Minimal working JSON: `{"id":"<pkg>","url":"<url>","author":"",
+  "name":"","additionalSettings":"{}"}`.
+- **`loadApps()` (`app_data_provider.dart`) scans the app's own
+  `<external-files-dir>/app_data/*.json` on load** -- this is why
+  `sync_obtainium_repos` writes directly into
+  `/storage/emulated/0/Android/data/<pkg>/files/app_data/<tracked-pkg>.json`
+  rather than going through any Obtainium API/intent; there isn't one for
+  this (see below). If the entry's `url` fails to resolve to a known source
+  non-transiently, Obtainium deletes the file itself on next load -- so a
+  bad `url:` in the config silently stops being tracked rather than erroring
+  loudly; not handled specially here, matches Obtainium's own behavior.
+- **No headless "force check/fetch" exists, checked in the source before
+  concluding this** -- only interactive deep-links
+  (`obtainium://add/<url>`, `obtainium://app/<json>`), both requiring a
+  confirmation-dialog tap per `docs/DEVELOPER_GUIDE.md`. Real background
+  checks run via a WorkManager periodic task (~15 min), not triggerable via
+  adb/broadcast. `sync_obtainium_repos` therefore only ever seeds the
+  pointer file; it does not attempt to force Obtainium to populate
+  `latestVersion`/etc immediately, and the README says so rather than
+  implying it's instant.
+- **Requires root, unconditionally** -- scoped storage under
+  `Android/data/<pkg>/` is unreadable/unwritable for anything but the
+  owning app's own UID without root. `sync_obtainium_repos` calls
+  `resolve_root_framework` first and returns early (an `OK`-level skip, not
+  an error -- this is expected/routine on a non-rooted device) if root
+  isn't enabled/detected, exactly like modules do.
+- **Ownership/permissions are read from the live device, never
+  hardcoded** -- `stat -c '%U:%G' /storage/emulated/0/Android/data/<pkg>`
+  gives the app's actual UID:GID (e.g. `u0_a197:sdcard_rw` on a real
+  device), then the pushed JSON gets `chown`'d to match and `chmod 660`;
+  a mismatched owner means Obtainium's own process can't read the file
+  back even though it's technically present.
+- **Supports both `dev.imranr.obtainium` and `dev.imranr.obtainium.fdroid`**
+  -- checks `is_installed` for the F-Droid variant first, falls back to the
+  base package, and **errors out** (`return 1`, not a skip) if neither is
+  present -- unlike the `root.enabled: false` case (an `OK`-level skip,
+  since the feature is inherently unavailable there), a rooted device with
+  `obtainium:` configured but Obtainium itself missing is a real
+  misconfiguration (the config forgot to also install Obtainium via
+  `apps:`), so `apply` should fail loudly rather than silently no-op.
+  Consistent with
+  `apps.yaml`'s own Obtainium entry always being `store: fdroid` (see the
+  `INSTALL_FAILED_VERSION_DOWNGRADE` bug below) -- GitHub's own release
+  APK is internally `dev.imranr.obtainium`, never the `.fdroid`-suffixed
+  package, confirmed via `aapt2 dump badging` on the actual downloaded
+  APK; a `store: github` + `pkg: dev.imranr.obtainium.fdroid` config can
+  never successfully install.
+- **Already-tracked entries are skipped, not diffed/updated** -- existence
+  of `<app_data>/<pkg>.json` on-device is the entire signal (no content
+  comparison against `url:`/`settings:` in the config). Changing an
+  already-tracked entry's `url:`/`settings:` in the config has no effect on
+  a subsequent `apply`; only a first-seed is supported. Acceptable for now
+  since this mirrors modules' own "install if missing, no drift
+  convergence" behavior, not a special-cased limitation just for this
+  feature.
+- **Live-verified end to end against a real device (mi pad 4, `magisk`,
+  brand-new empty Obtainium install)**, not just `bash -n`/shellcheck:
+  `--dry-run` correctly distinguished an already-tracked pkg (`SKP ...
+  already tracked`) from a new one (`would seed Obtainium tracking for
+  ...`); a real run wrote the JSON with correct content, `660` perms, and
+  ownership matching the app's actual UID/GID (confirmed via `stat`); a
+  second real run correctly no-op'd (`SKP` for both); and the same config
+  against a non-rooted device (zf10) correctly skipped with `OK Root not
+  enabled/detected on ..., skipping configured Obtainium repo(s)` rather
+  than erroring.
+
 ## Nix packaging
 
 - `pkgs/declaroid/default.nix` wraps the script with `makeWrapper`, prefixing

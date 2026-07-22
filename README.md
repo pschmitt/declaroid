@@ -266,15 +266,16 @@ apps:
 ```
 
 Paths are relative to the file that references them. Each import's
-`apps:`/`modules:`/`profiles:` entries are merged in first (in listed
-order), then the file's own -- pure concatenation, not an override or a
-dedup by pkg/id, so listing the same app in both a shared file and the
+`apps:`/`modules:`/`profiles:`/`obtainium:` entries are merged in first (in
+listed order), then the file's own -- pure concatenation, not an override or
+a dedup by pkg/id, so listing the same app in both a shared file and the
 device file gives you two rows, not one. An import can itself have its
 own `imports:` (resolved recursively), and a cycle is detected and
 rejected rather than hanging. Every other top-level key (`device:`,
 `store:`, `enforce:`, `adb:`, `root:`, `profile:`) only ever comes from
 the file you actually pointed `--config`/`-c` at -- a shared fragment is
-just a library of apps/modules, not a device template of its own.
+just a library of apps/modules/obtainium repos, not a device template of
+its own.
 
 This only applies to `apply`/`uninstall`/`diff`/`modules` -- `add` and
 `download` always read (and `add` writes) the file you point them at
@@ -445,6 +446,56 @@ INF Downloading PlayIntegrityFix_v4.7-1-inject-s.zip
 OK Play Integrity Fix [INJECT] (playintegrityfix) installed
 OK All modules processed successfully
 WRN 1 module(s) installed -- reboot the device(s) for changes to take effect
+```
+
+### `obtainium:` -- tracking repos in the Obtainium app
+
+[Obtainium](https://github.com/ImranR98/Obtainium) tracks apps installed from
+outside an app store (GitHub releases, direct URLs, ...) and checks them for
+updates. It keeps one JSON file per tracked app under its own scoped-storage
+`app_data` directory on the device -- `apply` can seed that directly, so a
+config can declare "Obtainium should be tracking this repo" the same way it
+declares apps/modules:
+
+```yaml
+obtainium:
+  - pkg: com.kieronquinn.app.smartspacer
+    url: "https://github.com/KieronQuinn/Smartspacer"
+```
+
+This **requires root** (scoped storage is otherwise unreadable/unwritable
+for anything but the owning app itself) and is skipped entirely, with a
+notice, on a device with `root.enabled: false`. On a rooted device it's an
+**error** (apply exits non-zero) if neither `dev.imranr.obtainium` nor
+`dev.imranr.obtainium.fdroid` is installed there -- make sure your config
+also installs Obtainium itself as a regular `apps:` entry (or via an
+import) if it declares `obtainium:` entries.
+`apply` only ever adds missing entries -- an already-tracked `pkg` is left
+untouched, so re-running is a no-op. The JSON written is the minimal shape
+Obtainium's own `App.fromJson` accepts (id/url/author/name/additionalSettings
+-- everything else has an in-app default), not a full vendored copy of its
+internal state, so this stays a thin pointer rather than a second source of
+truth for the metadata Obtainium tracks on its own (`latestVersion`,
+`apkUrls`, etc).
+
+There is no way to force Obtainium to fetch/refresh a newly-seeded entry's
+metadata immediately -- it only happens the next time the app is opened, or
+via its own ~15 minute background check. Obtainium exposes no headless
+"check now" mechanism (only interactive deep-links that require a
+confirmation tap), so this is a real, permanent limitation rather than
+something declaroid works around.
+
+An optional `settings:` map is merged into that entry's `additionalSettings`
+(Obtainium's own per-app config -- track-only vs auto-update, prerelease
+inclusion, asset filters, etc; see Obtainium's own UI for the available
+keys):
+
+```yaml
+obtainium:
+  - pkg: org.breezyweather
+    url: "https://github.com/breezy-weather/breezy-weather"
+    settings:
+      trackOnly: true
 ```
 
 ### Stores

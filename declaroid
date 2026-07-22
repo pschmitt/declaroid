@@ -171,14 +171,15 @@ never fails the command itself.
 
 ${C_BOLD}Config schema:${C_RESET}
   imports:                                    # optional; other config file(s) to pull apps:/
-                                               # modules:/profiles: from, paths relative to this
-                                               # file. Merged in as: every import's entries
-                                               # first (in listed order, recursively -- an
-                                               # import may itself have imports:), then this
-                                               # file's own -- pure concatenation, no override/
-                                               # dedup by pkg/id. Applies to apply/uninstall/
-                                               # diff/modules only -- add/download always read
-                                               # and write the file as-is, ignoring imports:.
+                                               # modules:/profiles:/obtainium: from, paths
+                                               # relative to this file. Merged in as: every
+                                               # import's entries first (in listed order,
+                                               # recursively -- an import may itself have
+                                               # imports:), then this file's own -- pure
+                                               # concatenation, no override/dedup by pkg/id.
+                                               # Applies to apply/uninstall/diff/modules only --
+                                               # add/download always read and write the file
+                                               # as-is, ignoring imports:.
     - <path, e.g. common-apps.yaml>
   device: <adb serial or substring query>   # optional, see device resolution above
   store: gplay|fdroid|izzyondroid|github|local|url  # optional top-level default, defaults to gplay
@@ -258,6 +259,15 @@ ${C_BOLD}Config schema:${C_RESET}
                                        # install". Flipping it back to
                                        # false/unset re-enables it (pm enable)
                                        # on the next apply.
+  obtainium:                                   # optional; repos for the Obtainium app itself
+                                                 # to track (apply only, requires root -- see
+                                                 # below)
+    - pkg: <package id>                          # the tracked app's own package id
+      url: <repo URL>                            # e.g. a GitHub repo URL, whatever Obtainium's
+                                                   # own "Add App" would accept
+      settings:                                   # optional; merged into Obtainium's own
+                                                    # additionalSettings for this entry
+        <key>: <value>
 
 github releases are queried via the GitHub API; set \$GITHUB_TOKEN to raise
 the unauthenticated rate limit or access private repos. If a repo has no
@@ -289,6 +299,22 @@ root.framework isn't set) probes the device directly for the apd/magisk
 CLI, not for either app's package id -- Magisk supports hiding/
 repackaging its own app specifically to evade that kind of check, so it
 isn't a reliable signal.
+
+\`apply\` also seeds any configured obtainium: entries that Obtainium
+(dev.imranr.obtainium or dev.imranr.obtainium.fdroid, whichever is
+installed) isn't already tracking, by writing a minimal JSON file directly
+into its scoped-storage app_data dir -- the same format Obtainium writes
+for itself, not a full vendored copy of its internal state. This requires
+root (scoped storage is otherwise unreadable/unwritable for anything but
+the owning app) and is skipped entirely, with a notice, on devices with
+root.enabled: false -- but it's an error (apply exits non-zero) if
+obtainium: entries are configured and root IS available yet neither
+Obtainium package is actually installed there, since that's a real
+misconfiguration rather than an expected limitation. Already-tracked
+entries are left untouched (no update/force-refetch), and there is no way
+to force Obtainium itself to fetch metadata for a newly-seeded entry
+immediately -- it only happens the next time Obtainium is opened or its
+own ~15 minute background check runs.
 
 Table output (devices, diff, modules) is rendered with tsvtool if it's on
 \$PATH (https://github.com/pschmitt/tsvtool), otherwise with column -t.
@@ -1697,14 +1723,14 @@ collect_imports() {
 
 # If $config has no `imports:` at all (the common case), prints $config
 # unchanged -- no copy, no temp file. Otherwise merges apps:/modules:/
-# profiles: from every resolved import (collect_imports, in dependency
-# order) plus $config's own entries (last -- imports contribute first, so
-# a device-specific file's own list conceptually reads as "on top of the
-# shared ones", though this is pure concatenation, not an override/dedup
-# by pkg/id) into a throwaway temp copy, and prints *that* path instead.
-# Every other top-level key (device/store/enforce/adb/root/profile) is
-# copied verbatim from $config, untouched -- imports only ever contribute
-# to those three list-type sections. Every caller (cmd_apply/cmd_uninstall/
+# profiles:/obtainium: from every resolved import (collect_imports, in
+# dependency order) plus $config's own entries (last -- imports contribute
+# first, so a device-specific file's own list conceptually reads as "on
+# top of the shared ones", though this is pure concatenation, not an
+# override/dedup by pkg/id) into a throwaway temp copy, and prints *that*
+# path instead. Every other top-level key (device/store/enforce/adb/root/
+# profile) is copied verbatim from $config, untouched -- imports only
+# ever contribute to those four list-type sections. Every caller (cmd_apply/cmd_uninstall/
 # cmd_diff/cmd_modules) reassigns its own local `config` to this function's
 # output right after its own config-file-exists check, so every existing
 # `yq`/app_rows/module_rows/list_extra_pkgs/etc call site downstream keeps
@@ -1740,7 +1766,7 @@ resolve_config() {
   # same convention as add_app_to_config's DECLAROID_NAME/DECLAROID_PKG)
   # rather than trying to inline a large array as a literal expression.
   local key merged_file
-  for key in apps modules profiles
+  for key in apps modules profiles obtainium
   do
     merged_file="$(mktemp --suffix=.yaml)"
     yq eval-all "[(.$key // [])[]]" "${IMPORT_FILES[@]}" "$config" > "$merged_file"
@@ -2089,6 +2115,10 @@ cmd_apply() {
     fi
   fi
 
+  local -a configured_obtainium_pkgs
+  mapfile -t configured_obtainium_pkgs < <(yq -r '(.obtainium // [])[].pkg' "$config")
+  [[ ${#configured_obtainium_pkgs[@]} -gt 0 ]] && check_deps jq
+
   local DEVICE_SERIAL TARGET_USER ROOT_FRAMEWORK overall_rc=0
   local -a PLAN_PENDING MODULE_PLAN_PENDING REMOVAL_PLAN_PENDING
   local PLAN_SKIP_COUNT MODULE_PLAN_SKIP_COUNT MODULES_INSTALLED_COUNT=0
@@ -2202,6 +2232,11 @@ cmd_apply() {
           fi
         fi
       fi
+    fi
+
+    if [[ ${#configured_obtainium_pkgs[@]} -gt 0 ]] && ! sync_obtainium_repos "$config" "$DEVICE_SERIAL" "$cli_root_framework"
+    then
+      overall_rc=1
     fi
 
     if [[ -n "$enforce" ]] && ! enforce_config "$config" "$DEVICE_SERIAL" "$DRY_RUN" "$assume_yes"
@@ -3972,6 +4007,155 @@ resolve_root_framework() {
   fi
 
   detect_root_framework "$device"
+}
+
+# Emits configured Obtainium-tracked repos as one row per entry: pkg, url,
+# settings (a compact JSON object of Obtainium `additionalSettings`
+# overrides, defaulting to "{}") -- joined with U+00A7, same convention as
+# app_rows/module_rows. `to_json(0)` (not the bare `to_json`, which
+# pretty-prints across multiple lines and would break the one-row-per-line
+# convention every row-consuming loop in this file relies on) gives compact
+# single-line JSON.
+obtainium_rows() {
+  local config="$1"
+
+  # shellcheck disable=SC2016
+  yq -r '(.obtainium // [])[] | [.pkg, .url, (.settings // {} | to_json(0))] | join("§")' "$config"
+}
+
+# Obtainium (an app-update-tracking app) self-updates whatever it tracks by
+# reading/writing one JSON file per tracked app under its own external
+# app-storage dir -- `/storage/emulated/0/Android/data/<obtainium
+# pkg>/files/app_data/<tracked pkg>.json` -- which requires root to access
+# at all (Android's scoped storage locks Android/data/* to the owning app's
+# own UID otherwise). This only ever *seeds* a missing entry, never
+# touches one that's already tracked -- Obtainium's own next update check
+# (background, ~15min via WorkManager, or whenever the user next opens the
+# app) fills in everything else (name, author, latestVersion, apkUrls,
+# ...) on its own; there's no clean way to force that check immediately
+# from adb (checked Obtainium's own source: only interactive deep-links
+# exist, `obtainium://add/...` and `obtainium://app/...`, both requiring a
+# confirmation tap, not something declaroid should fake via blind
+# screen-coordinate taps).
+#
+# The minimal JSON that follows was confirmed by reading Obtainium's own
+# `App.fromJson`/`App` model (source_provider.dart): `id`/`url`/`author`/
+# `name`/`additionalSettings` are the only fields it requires outright
+# (author/name may be empty strings; additionalSettings must be *a* JSON
+# string, "{}" is fine); everything else (latestVersion, apkUrls,
+# preferredApkIndex, lastUpdateCheck, categories, ...) has an in-code
+# fallback and can be omitted entirely. Verified against a real rooted
+# device (mp4, previously-empty Obtainium install): the seeded entry
+# showed up immediately in Obtainium's own app list as a trackable,
+# not-yet-installed app with the correct URL/pkg, confirmed via a real
+# screenshot of the app's detail page -- not vendoring Obtainium's full
+# per-app JSON blob (much of which is its own live-refreshed cache state)
+# was a hard requirement here, not a nice-to-have.
+sync_obtainium_repos() {
+  local config="$1"
+  local device="$2"
+  local cli_root_framework="$3"
+
+  local -a rows
+  mapfile -t rows < <(obtainium_rows "$config")
+  [[ ${#rows[@]} -eq 0 ]] && return 0
+  [[ ${#rows[@]} -eq 1 && -z "${rows[0]}" ]] && return 0
+
+  if ! resolve_root_framework "$config" "$cli_root_framework" "$device" >/dev/null
+  then
+    log_ok "Root not enabled/detected on $device, skipping configured Obtainium repo(s)"
+    return 0
+  fi
+
+  # Obtainium ships (at least) two package id variants -- the plain GitHub
+  # release build (dev.imranr.obtainium) and F-Droid's own separately-built
+  # flavor (dev.imranr.obtainium.fdroid, confirmed via aapt2 dump badging
+  # to be a genuinely different package, not just a config typo -- see
+  # AGENTS.md). Each has its own, entirely separate Android/data storage,
+  # so this only works against whichever variant is actually installed;
+  # .fdroid is preferred if somehow both are present.
+  local obtainium_pkg
+  if is_installed "$device" dev.imranr.obtainium.fdroid
+  then
+    obtainium_pkg=dev.imranr.obtainium.fdroid
+  elif is_installed "$device" dev.imranr.obtainium
+  then
+    obtainium_pkg=dev.imranr.obtainium
+  else
+    log_error "obtainium: entries are configured but neither dev.imranr.obtainium nor dev.imranr.obtainium.fdroid is installed on $device"
+    return 1
+  fi
+
+  local app_data_dir="/storage/emulated/0/Android/data/$obtainium_pkg/files/app_data"
+
+  # The new file has to end up owned by Obtainium's own app UID/GID (not
+  # root's) or Obtainium can't read it back -- confirmed by matching a real
+  # device's existing app_data files (owner u0_a197:sdcard_rw there, but
+  # the exact uid varies per device/user, so this reads it from the app's
+  # own storage dir rather than hardcoding a name).
+  local owner
+  owner="$(run_root_shell "$device" "stat -c '%U:%G' /storage/emulated/0/Android/data/$obtainium_pkg")"
+
+  if [[ -z "$owner" ]]
+  then
+    log_error "Could not determine $obtainium_pkg's storage owner on $device, skipping configured Obtainium repo(s)"
+    return 1
+  fi
+
+  local row pkg url settings_json rc=0
+  for row in "${rows[@]}"
+  do
+    [[ -z "$row" ]] && continue
+    IFS='§' read -r pkg url settings_json <<< "$row"
+
+    if [[ -n "$(run_root_shell "$device" "[ -e '$app_data_dir/$pkg.json' ] && echo yes")" ]]
+    then
+      [[ -n "$VERBOSE" ]] && log_skip "Obtainium repo $pkg already tracked"
+      continue
+    fi
+
+    log_step "Adding Obtainium repo $pkg ($url)"
+
+    if [[ -n "$DRY_RUN" ]]
+    then
+      printf '  would seed Obtainium tracking for %s\n' "$pkg"
+      continue
+    fi
+
+    local json_file
+    json_file="$(mktemp --suffix=.json)"
+    if ! jq -n --arg id "$pkg" --arg url "$url" --argjson settings "$settings_json" \
+      '{id: $id, url: $url, author: "", name: "", additionalSettings: ($settings | tojson)}' \
+      > "$json_file"
+    then
+      log_error "Failed to build Obtainium JSON for $pkg"
+      rm -f "$json_file"
+      rc=1
+      continue
+    fi
+
+    local remote_tmp="/data/local/tmp/declaroid-obtainium-$pkg.json"
+    if ! adb -s "$device" push "$json_file" "$remote_tmp" >/dev/null 2>&1
+    then
+      log_error "Failed to push Obtainium JSON for $pkg"
+      rm -f "$json_file"
+      rc=1
+      continue
+    fi
+    rm -f "$json_file"
+
+    if run_root_shell "$device" "cp '$remote_tmp' '$app_data_dir/$pkg.json' && chown $owner '$app_data_dir/$pkg.json' && chmod 660 '$app_data_dir/$pkg.json'" >/dev/null
+    then
+      log_ok "Obtainium repo $pkg added"
+    else
+      log_error "Failed to install Obtainium JSON for $pkg"
+      rc=1
+    fi
+
+    adb -s "$device" shell "rm -f '$remote_tmp'" >/dev/null 2>&1
+  done
+
+  return "$rc"
 }
 
 # apd's own `module list` JSON is the source of truth for which modules

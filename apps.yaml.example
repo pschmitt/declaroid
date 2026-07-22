@@ -1,7 +1,7 @@
 # Copy this file to ~/.config/declaroid/apps.yaml (or point --config /
 # $DECLAROID_CONFIG at your own copy) and adjust it to your needs.
 
-# Optional. Pulls in apps:/modules:/profiles: from other config file(s) --
+# Optional. Pulls in apps:/modules:/profiles:/obtainium: from other config file(s) --
 # paths relative to this file -- so shared apps/modules don't have to be
 # repeated across a config-per-device setup. Merged as: each import's
 # entries first (in listed order, recursively), then this file's own --
@@ -83,3 +83,16 @@ apps:
     # (unlike --enforce, this doesn't require anything else in the config).
     state:
       installed: false
+
+  - name: Obtainium
+    pkg: dev.imranr.obtainium.fdroid
+    store: fdroid
+
+# Optional (apply only). Repos for Obtainium (installed above) to track --
+# requires root; errors out if root is enabled but Obtainium itself isn't
+# installed, skipped entirely (no error) if root.enabled is false. Only
+# adds missing entries; already-tracked ones are left untouched. See
+# README.md for the full writeup, including the optional settings: map.
+# obtainium:
+#   - pkg: com.kieronquinn.app.smartspacer
+#     url: "https://github.com/KieronQuinn/Smartspacer"
