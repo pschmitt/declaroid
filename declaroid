@@ -4104,7 +4104,7 @@ sync_obtainium_repos() {
   local owner
   if [[ -z "$DRY_RUN" ]]
   then
-    if [[ -z "$(run_root_shell "$device" "[ -d '$storage_dir' ] && echo yes")" ]]
+    if [[ -z "$(run_root_shell "$device" "[ -d '$app_data_dir' ] && echo yes")" ]]
     then
       # A fresh install has no scoped-storage dir at all yet -- Android
       # only creates Android/data/<pkg> the first time the app itself
@@ -4112,14 +4112,31 @@ sync_obtainium_repos() {
       # installed dev.imranr.obtainium.fdroid earlier in the very same
       # run, and its storage dir didn't exist until launched once).
       # `monkey`'s LAUNCHER-category launch works headlessly (no need to
-      # resolve/hardcode a main activity name); force-stopping it right
-      # back leaves the device otherwise as it was -- Obtainium itself
-      # creates its own app_data/ subdirectory on startup, so one launch
-      # is enough for every step below to work.
+      # resolve/hardcode a main activity name). `files/app_data` itself is
+      # created by Obtainium's own Dart init code partway through startup
+      # -- not by Android at process start, and not instantly -- so a
+      # single fixed sleep is unreliable (confirmed against a real device:
+      # 2s was enough once, not enough on a later run against the same
+      # app). Poll for it instead, up to 10s, then force-stop the app
+      # right back either way -- it's only needed running long enough to
+      # create its own directory once.
       log_step "Launching $obtainium_pkg once to create its storage directory"
       adb -s "$device" shell monkey -p "$obtainium_pkg" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
-      sleep 2
+
+      local waited=0
+      while [[ -z "$(run_root_shell "$device" "[ -d '$app_data_dir' ] && echo yes")" && "$waited" -lt 10 ]]
+      do
+        sleep 1
+        waited=$((waited + 1))
+      done
+
       adb -s "$device" shell am force-stop "$obtainium_pkg" >/dev/null 2>&1
+
+      if [[ -z "$(run_root_shell "$device" "[ -d '$app_data_dir' ] && echo yes")" ]]
+      then
+        log_error "$obtainium_pkg's app_data directory never appeared on $device after launching it, skipping configured Obtainium repo(s)"
+        return 1
+      fi
     fi
 
     # The new file has to end up owned by Obtainium's own app UID/GID (not
