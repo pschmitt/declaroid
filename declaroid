@@ -182,7 +182,8 @@ ${C_BOLD}Config schema:${C_RESET}
                                                # recursively -- an import may itself have
                                                # imports:), then this file's own -- pure
                                                # concatenation, no override/dedup by pkg/id.
-                                               # enforce:/grant_permissions:/store: cascade in
+                                               # enforce:/grant_permissions:/store:/
+                                               # obtainium_auto_track: cascade in
                                                # from imports differently (override, not
                                                # concatenation): this file's own value wins if
                                                # set at all, else the last import that sets it
@@ -212,6 +213,16 @@ ${C_BOLD}Config schema:${C_RESET}
                                                # to always passing -g/--grant-permissions. The
                                                # CLI flag and this OR together. No effect on
                                                # store: fdroid/izzyondroid apps (see -g above).
+  obtainium_auto_track: true|false            # optional, default false (apply only); auto-adds
+                                               # every apps: entry with store: github to
+                                               # Obtainium's tracked repos (see obtainium: below),
+                                               # as if it also had its own obtainium: entry, no
+                                               # settings:. An app's own
+                                               # obtainium: true/false (see apps: below) overrides
+                                               # this default just for that one app either way. A
+                                               # pkg that already has an explicit obtainium: entry
+                                               # of its own is never duplicated, regardless of
+                                               # this setting.
   profiles:                                   # optional, gives profile: short aliases
     - name: <alias, e.g. work>
       id: <user id, e.g. 10>
@@ -251,6 +262,11 @@ ${C_BOLD}Config schema:${C_RESET}
                                      # a directory (every *.apk directly inside it).
       url: <http(s) URL>            # required when store is url; a direct link to
                                      # a single apk file, fetched at install time.
+      obtainium: true|false         # optional (store: github only); overrides
+                                     # obtainium_auto_track: for just this one app --
+                                     # true tracks it in Obtainium even with that
+                                     # default off, false excludes it even with that
+                                     # default on. Unset means: follow the default.
       profile: <name>|<user id>|all|current
                                      # optional, overrides the top-level default;
                                      # which Android user/profile to install for
@@ -282,7 +298,16 @@ ${C_BOLD}Config schema:${C_RESET}
       url: <repo URL>                            # e.g. a GitHub repo URL, whatever Obtainium's
                                                    # own "Add App" would accept
       settings:                                   # optional; merged into Obtainium's own
-                                                    # additionalSettings for this entry
+                                                    # additionalSettings for this entry, using
+                                                    # Obtainium's own setting names verbatim (see
+                                                    # its "Add App"/per-app settings UI for the
+                                                    # available keys) -- not translated into a
+                                                    # declaroid-specific vocabulary. e.g.
+                                                    # includePrereleases: true is needed for a repo
+                                                    # whose only release(s) are marked prerelease on
+                                                    # GitHub (otherwise invisible to Obtainium,
+                                                    # surfacing as its own "Could not find a
+                                                    # suitable release" error)
         <key>: <value>
 
 github releases are queried via the GitHub API; set \$GITHUB_TOKEN to raise
@@ -1754,11 +1779,12 @@ collect_imports() {
 # first, so a device-specific file's own list conceptually reads as "on
 # top of the shared ones", though this is pure concatenation, not an
 # override/dedup by pkg/id) into a throwaway temp copy, and prints *that*
-# path instead. `enforce`/`grant_permissions`/`store` additionally cascade
-# in from imports as scalar overrides (config's own value wins if set at
-# all, else the last import that sets it) -- see the scalar_key loop
-# below. Every other top-level key (device/adb/root/profile) is copied
-# verbatim from $config, untouched -- imports never contribute to those.
+# path instead. `enforce`/`grant_permissions`/`store`/`obtainium_auto_track`
+# additionally cascade in from imports as scalar overrides (config's own
+# value wins if set at all, else the last import that sets it) -- see the
+# scalar_key loop below. Every other top-level key (device/adb/root/profile)
+# is copied verbatim from $config, untouched -- imports never contribute
+# to those.
 # Every caller (cmd_apply/cmd_uninstall/
 # cmd_diff/cmd_modules) reassigns its own local `config` to this function's
 # output right after its own config-file-exists check, so every existing
@@ -1807,10 +1833,11 @@ resolve_config() {
   # (a device config's own value always wins if it sets the key at all;
   # otherwise the last import in the list that sets it wins) -- this is
   # what lets a shared imports/base.yaml carry defaults like `enforce:
-  # true`/`store: gplay` for every device that imports it, without every
-  # device file having to repeat it. Deliberately only these three keys,
-  # not device/adb/root/profile -- those stay squarely a per-device
-  # concern, never cascaded from an import.
+  # true`/`store: gplay`/`obtainium_auto_track: true` for every device
+  # that imports it, without every device file having to repeat it.
+  # Deliberately only these four keys, not device/adb/root/profile --
+  # those stay squarely a per-device concern, never cascaded from an
+  # import.
   #
   # The value is round-tripped through its own one-line temp file and
   # `load(strenv(...))`, same mechanism as the list-key merge above, not
@@ -1821,7 +1848,7 @@ resolve_config() {
   # input text" -- yq's expression language, unlike YAML itself, has no
   # bare-unquoted-string literal syntax).
   local scalar_key has_own has_import chosen_file imp_val_file imp
-  for scalar_key in enforce grant_permissions store
+  for scalar_key in enforce grant_permissions store obtainium_auto_track
   do
     has_own="$(yq -r "has(\"$scalar_key\")" "$config")"
     [[ "$has_own" == true ]] && continue
@@ -2199,9 +2226,17 @@ cmd_apply() {
     fi
   fi
 
+  # obtainium_needed also has to account for obtainium_auto_track:/a
+  # per-app obtainium: true override -- both can make sync_obtainium_repos
+  # have real work to do even with an empty (or absent) obtainium: list of
+  # its own. See effective_obtainium_rows.
   local -a configured_obtainium_pkgs
   mapfile -t configured_obtainium_pkgs < <(yq -r '(.obtainium // [])[].pkg' "$config")
-  [[ ${#configured_obtainium_pkgs[@]} -gt 0 ]] && check_deps jq
+  local obtainium_needed=""
+  [[ ${#configured_obtainium_pkgs[@]} -gt 0 ]] && obtainium_needed=1
+  [[ "$(yq -r '.obtainium_auto_track == true' "$config")" == true ]] && obtainium_needed=1
+  [[ "$(yq -r '[.apps[] | select(.obtainium == true)] | length > 0' "$config")" == true ]] && obtainium_needed=1
+  [[ -n "$obtainium_needed" ]] && check_deps jq
 
   local DEVICE_SERIAL TARGET_USER ROOT_FRAMEWORK overall_rc=0
   local -a PLAN_PENDING MODULE_PLAN_PENDING REMOVAL_PLAN_PENDING
@@ -2318,7 +2353,7 @@ cmd_apply() {
       fi
     fi
 
-    if [[ ${#configured_obtainium_pkgs[@]} -gt 0 ]] && ! sync_obtainium_repos "$config" "$DEVICE_SERIAL" "$cli_root_framework"
+    if [[ -n "$obtainium_needed" ]] && ! sync_obtainium_repos "$config" "$DEVICE_SERIAL" "$cli_root_framework"
     then
       overall_rc=1
     fi
@@ -4104,15 +4139,78 @@ resolve_root_framework() {
 # Emits configured Obtainium-tracked repos as one row per entry: pkg, url,
 # settings (a compact JSON object of Obtainium `additionalSettings`
 # overrides, defaulting to "{}") -- joined with U+00A7, same convention as
-# app_rows/module_rows. `to_json(0)` (not the bare `to_json`, which
-# pretty-prints across multiple lines and would break the one-row-per-line
-# convention every row-consuming loop in this file relies on) gives compact
-# single-line JSON.
+# app_rows/module_rows. `settings:` keys are passed straight through
+# verbatim, using Obtainium's own upstream setting names as-is (e.g.
+# `includePrereleases`) -- deliberately not translated/renamed into a
+# declaroid-specific vocabulary, which would just be an extra layer to
+# keep in sync as Obtainium adds/renames settings over time, for no real
+# benefit over just documenting the setting name in a comment/example.
+# `to_json(0)` (not the bare `to_json`, which pretty-prints across
+# multiple lines and would break the one-row-per-line convention every
+# row-consuming loop in this file relies on) gives compact single-line
+# JSON.
 obtainium_rows() {
   local config="$1"
 
   # shellcheck disable=SC2016
   yq -r '(.obtainium // [])[] | [.pkg, .url, (.settings // {} | to_json(0))] | join("§")' "$config"
+}
+
+# Combines explicit obtainium: rows (obtainium_rows, always included and
+# always winning on a pkg collision) with ones auto-derived from apps:
+# store: github entries -- for an app with no per-app obtainium: override,
+# whether it's included at all depends on the top-level
+# obtainium_auto_track: default; an app's own obtainium: true forces it in
+# even with that default off, obtainium: false forces it out even with
+# that default on. Explicit obtainium: entries always win over an
+# auto-derived one for the same pkg (checked first, added to `seen`
+# before the apps: scan even starts) -- an app that's both explicitly
+# listed under obtainium: (with its own settings:) and also
+# apps:-eligible for auto-tracking only ever gets that one
+# explicit, settings-carrying row, never a second, settings-less
+# auto-derived duplicate for the same pkg.
+effective_obtainium_rows() {
+  local config="$1"
+
+  local -A seen=()
+  local -a explicit_rows
+  mapfile -t explicit_rows < <(obtainium_rows "$config")
+
+  local row pkg
+  for row in "${explicit_rows[@]}"
+  do
+    [[ -z "$row" ]] && continue
+    IFS='§' read -r pkg _ _ <<< "$row"
+    seen["$pkg"]=1
+    printf '%s\n' "$row"
+  done
+
+  local auto_track
+  auto_track="$(yq -r '.obtainium_auto_track == true' "$config")"
+
+  local -a github_apps
+  # shellcheck disable=SC2016
+  mapfile -t github_apps < <(yq -r '.apps[] | select(.store == "github") | [.pkg, .repo, has("obtainium"), (.obtainium // false)] | join("§")' "$config")
+
+  local repo has_override override_val effective
+  for row in "${github_apps[@]}"
+  do
+    [[ -z "$row" ]] && continue
+    IFS='§' read -r pkg repo has_override override_val <<< "$row"
+    [[ -n "${seen[$pkg]:-}" ]] && continue
+    [[ -z "$repo" ]] && continue
+
+    if [[ "$has_override" == true ]]
+    then
+      effective="$override_val"
+    else
+      effective="$auto_track"
+    fi
+    [[ "$effective" != true ]] && continue
+
+    seen["$pkg"]=1
+    printf '%s§https://github.com/%s§{}\n' "$pkg" "$repo"
+  done
 }
 
 # Obtainium (an app-update-tracking app) self-updates whatever it tracks by
@@ -4149,7 +4247,7 @@ sync_obtainium_repos() {
   local cli_root_framework="$3"
 
   local -a rows
-  mapfile -t rows < <(obtainium_rows "$config")
+  mapfile -t rows < <(effective_obtainium_rows "$config")
   [[ ${#rows[@]} -eq 0 ]] && return 0
   [[ ${#rows[@]} -eq 1 && -z "${rows[0]}" ]] && return 0
 

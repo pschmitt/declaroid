@@ -531,6 +531,56 @@ obtainium:
       trackOnly: true
 ```
 
+`settings:` keys are Obtainium's own upstream setting names, used verbatim
+(see Obtainium's own "Add App"/per-app settings UI for what's available) --
+deliberately not translated into a declaroid-specific vocabulary, which
+would just be another thing to keep in sync as Obtainium adds or renames
+settings over time. `includePrereleases: true` is a common one: needed for
+a repo whose only release(s) are marked prerelease on GitHub, since
+Obtainium otherwise ignores those entirely by default -- confirmed for a
+real repo whose sole release ships under the tag `latest` but with GitHub's
+own `prerelease` flag set to `true`, surfacing as Obtainium's own "Could
+not find a suitable release" error and no other symptom:
+
+```yaml
+obtainium:
+  - pkg: dev.pschmitt.findroidplus
+    url: "https://github.com/pschmitt/findroidplus"
+    settings:
+      includePrereleases: true
+```
+
+#### `obtainium_auto_track:` -- tracking every `store: github` app automatically
+
+Rather than listing every GitHub-sourced app under `obtainium:` by hand,
+set the top-level `obtainium_auto_track: true` to have `apply` track all of
+them automatically -- as if each had its own `obtainium:` entry (repo URL
+derived from that app's `repo:`, no `settings:`):
+
+```yaml
+obtainium_auto_track: true
+```
+
+Override it for one specific app with its own `obtainium: true`/`false` --
+`true` tracks that app even with the top-level default off; `false` excludes
+it even with the default on:
+
+```yaml
+apps:
+  - name: "Findroid+"
+    pkg: dev.pschmitt.findroidplus
+    store: github
+    repo: "pschmitt/findroidplus"
+    obtainium: false   # e.g. already tracked with custom settings: below
+```
+
+An app that also has its own explicit `obtainium:` list entry is never
+duplicated -- that entry (with whatever `settings:` it carries) always wins
+over an auto-derived one for the same `pkg`, regardless of
+`obtainium_auto_track:`/the app's own override. `obtainium_auto_track:`
+cascades in from `imports:` the same way `enforce:`/`grant_permissions:`/
+`store:` do (see the `imports:` section above).
+
 ### Stores
 
 Each app entry has a `store`, defaulting to whatever the top-level `store:`

@@ -837,6 +837,81 @@ incomplete change, not a follow-up.
      (that stays exclusively `apps:`'s job) -- this fix only stops
      `--enforce` from removing an app it doesn't recognize as configured
      when it actually is, just under a different key.
+  3. **A fixed `sleep 2` after launching Obtainium wasn't reliably long
+     enough for its own `files/app_data` subdirectory to actually
+     appear** -- that directory is created by Obtainium's own Dart init
+     code partway through its startup, not by Android at process launch,
+     and its timing isn't guaranteed. Confirmed live: worked once, then
+     failed (every configured repo's write erroring) on a later run
+     against the very same app on the very same device. Fixed by polling
+     for `$app_data_dir` itself (not just the top-level storage dir) for
+     up to 10s instead of a single fixed sleep, erroring cleanly if it
+     never appears rather than letting every individual write fail with a
+     vague, per-repo error.
+  4. **A real `--dry-run` false-positive**: since `--dry-run` never
+     actually installs anything, a config that both installs Obtainium
+     via `apps:` and configures `obtainium:` repos spuriously errored
+     ("neither ... is installed") on a fresh device's very first preview,
+     even though the real run right after it would work fine (confirmed
+     live). Softened for `--dry-run` only: if Obtainium is configured to
+     be installed at all (present in `apps:` with `state.installed` not
+     `false`), note it and continue instead of erroring; still errors in
+     `--dry-run` if `obtainium:` is configured without installing
+     Obtainium anywhere, since no real run would fix that either.
+- **`yq -r 'expr | tostring'` is not valid yq-go syntax -- `tostring`
+  doesn't exist as a function there** (unlike jq, which does have one).
+  Hit this writing `effective_obtainium_rows`'s `has("obtainium") |
+  tostring` -- errored with a cryptic `invalid input text "tostring)"`
+  that doesn't even name the missing function. Fix: don't call it at
+  all -- `yq -r` already stringifies a bare scalar/boolean node on output
+  (`true`/`false` print as plain text), so there's nothing to convert in
+  the first place for this use case.
+- **`obtainium_auto_track:` (config-driven auto-add of every `store:
+  github` app to Obtainium tracking) + per-app `obtainium: true|false`
+  override, implemented as `effective_obtainium_rows`, layered in front of
+  `obtainium_rows`** -- explicit `obtainium:` entries are collected first
+  into a `seen` associative array keyed by pkg (and always printed
+  as-is, settings intact); the `apps: store: github` scan then skips
+  anything already in `seen`, and for the rest resolves
+  `effective = has_override ? override_val : auto_track` per app, only
+  emitting a row (with a derived `https://github.com/$repo` URL and empty
+  `{}` settings) when that resolves to `true`. This is what makes "an app
+  explicitly listed under both `apps:` (github) and `obtainium:` (with its
+  own `settings:`) never gets a second, settings-less duplicate row"
+  actually hold, and what makes a per-app `obtainium: true` override work
+  even with the top-level default `false` (and vice versa for `false`).
+  `cmd_apply`'s own `obtainium_needed` gate (deciding whether to even call
+  `sync_obtainium_repos`/`check_deps jq` at all) has to independently check
+  all three of "explicit `obtainium:` list non-empty",
+  "`obtainium_auto_track: true`", and "any app has `obtainium: true`" --
+  checking only the first (as the original, pre-auto-track code did) would
+  silently skip the whole feature on a device with zero explicit
+  `obtainium:` entries but `obtainium_auto_track: true` or a lone per-app
+  override, which was a real bug caught while wiring this in, before ever
+  shipping it.
+- **Obtainium's `settings:` map (an app's `additionalSettings` override)
+  deliberately passes keys straight through using Obtainium's own upstream
+  names (e.g. `includePrereleases`), not a declaroid-translated
+  vocabulary** -- a real, user-driven decision, not an oversight: a
+  translation layer would need to be kept in sync by hand as Obtainium
+  adds/renames settings over time, for no benefit over just writing the
+  real key name once. (`include_pre_releases: true|false` as a first-class,
+  separately-merged field was tried first and reverted for exactly this
+  reason -- if resurrecting anything like it, don't; point people at
+  `settings:` instead.)
+- **Root-caused a real Obtainium "Could not find a suitable release"
+  error via Obtainium's own source, not guesswork**: `github_source.dart`
+  skips prerelease-flagged GitHub releases entirely unless
+  `additionalSettings['includePrereleases'] == true`; a live check via
+  `gh api 'repos/pschmitt/findroidplus/releases?per_page=5'` showed that
+  repo's *only* release is tagged `latest` but has GitHub's own
+  `"prerelease": true` -- so every release was being filtered out before
+  Obtainium ever got to asset-matching, `_selectGitHubTargetRelease`
+  returned `null`, and `NoReleasesError` (localized as "Could not find a
+  suitable release") followed. Not an APK-naming/multi-flavor-release
+  issue (a first, wrong hypothesis) -- `filterApks` with no
+  `apkFilterRegEx` set just passes every apk-like asset through
+  unfiltered, it doesn't error on ambiguity.
 
 ## Nix packaging
 
