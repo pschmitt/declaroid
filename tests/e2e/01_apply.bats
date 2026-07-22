@@ -11,7 +11,10 @@ setup_file() {
 }
 
 @test "apply installs a store: github app and seeds its configured obtainium: repo" {
-  run "$(declaroid_bin)" apply --config "$CONFIG" --device "$DEVICE" -y
+  echo "GITHUB_TOKEN set: ${GITHUB_TOKEN:+yes}"
+  run "$(declaroid_bin)" apply --config "$CONFIG" --device "$DEVICE" -y -v
+  echo "apply output:"
+  echo "$output"
   [ "$status" -eq 0 ]
 
   run adb -s "$DEVICE" shell pm list packages

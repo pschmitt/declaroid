@@ -24,7 +24,9 @@ setup_file() {
   run adb -s "$DEVICE" shell pm list packages
   [[ "$output" == *"package:org.fdroid.fdroid"* ]]
 
-  run "$(declaroid_bin)" apply --config "$CONFIG" --device "$DEVICE" --enforce -y
+  run "$(declaroid_bin)" apply --config "$CONFIG" --device "$DEVICE" --enforce -y -v
+  echo "apply --enforce output:"
+  echo "$output"
   [ "$status" -eq 0 ]
 
   run adb -s "$DEVICE" shell pm list packages
