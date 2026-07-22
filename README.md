@@ -142,18 +142,18 @@ $ declaroid COMMAND [OPTIONS]
 |---|---|---|
 | `-c, --config FILE` | all | Path to the apps YAML config |
 | `-d, --device QUERY` | all | Target device (see [device matching](#device-matching)) |
-| `--dry-run` | install, uninstall | Print what would happen, don't do it |
-| `-f, --force-download` | install | Re-download even if a cached copy exists |
-| `--enforce` | install | Also uninstall device apps that aren't in the config (prompts once per device) |
-| `--reboot` | install | Reboot the target device(s) at the end if any module(s) were installed (no-op otherwise) |
-| `-y, --yes, --noconfirm, --no-confirm` | install, install --enforce, uninstall, clear-cache | Skip the confirmation prompt |
-| `-v, --verbose` | install | Also log each already-installed app as it's skipped, instead of just a count in the plan |
+| `-k, --dry-run, --dryrun` | all | Print what would happen instead of doing it (apply/uninstall/clear-cache: what would be installed/removed; `add`: the YAML entry instead of writing it; `generate-config` with `-o`: print instead of writing the file). No-op on commands that are already read-only (`devices`/`diff`/`modules`/`search`) |
+| `-f, --force-download` | apply | Re-download even if a cached copy exists |
+| `--enforce` | apply | Also uninstall device apps that aren't in the config (prompts once per device); same as config `enforce: true` |
+| `--reboot` | apply | Reboot the target device(s) at the end if any module(s) were installed (no-op otherwise) |
+| `-y, --yes, --noconfirm, --no-confirm` | apply, apply --enforce, uninstall, clear-cache | Skip the confirmation prompt |
+| `-v, --verbose` | apply | Also log each already-installed app as it's skipped, instead of just a count in the plan |
 | `-o, --output FILE` | generate-config | Write to FILE instead of stdout |
 | `--system` | generate-config | Include system apps too (default: third-party only) |
 | `--no-labels, --fast` | generate-config | Skip app name resolution, use the package id instead |
 | `-j, --jobs N` | generate-config | Resolve up to N app names in parallel (default: 6) |
 | `--full` | diff, modules | Also list device apps/modules that aren't in the config, as `extra` |
-| `--root-framework apatch\|magisk` | modules, generate-config | Force which root framework to use instead of the config's `root.framework`/auto-detection |
+| `--root-framework apatch\|magisk` | apply, modules, generate-config | Force which root framework to use instead of the config's `root.framework`/auto-detection |
 | `--store gplay\|fdroid\|izzyondroid\|any` | search, add | Which store(s) to search (default: `any`; `izzyondroid` is opt-in, not part of `any`) |
 | `-l, --limit N` | search, add | Max results per store (default: 10) |
 | `--sort-by KEY` | diff, devices | Sort output case-insensitively. diff: `name` (default) or `pkg`. devices: `serial` (default), `model`, `codename`, or `connection` |

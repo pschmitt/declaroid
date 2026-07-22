@@ -46,6 +46,7 @@ _declaroid_common_args() {
     '(-c --config)'{-c,--config}'[Path to the apps YAML config]:file:_files'
     '(-d --device)'{-d,--device}'[Target device]:device:_declaroid_devices'
     '(--bulk --all-devices --all)'{--bulk,--all-devices,--all}'[Target every matching device instead of erroring on ambiguity]'
+    '(-k --dry-run --dryrun)'{-k,--dry-run,--dryrun}'[Print what would happen instead of doing it]'
     '(-h --help)'{-h,--help}'[Show help]'
   )
   _arguments -s -S $args "$@"
@@ -108,6 +109,7 @@ _declaroid() {
           _arguments \
             '--store[Store(s) to search]:store:(gplay fdroid izzyondroid any)' \
             '(-l --limit)'{-l,--limit}'[Max results per store]:limit' \
+            '(-k --dry-run --dryrun)'{-k,--dry-run,--dryrun}'[No-op -- this command is already read-only]' \
             '(-h --help)'{-h,--help}'[Show help]'
           ;;
         add)
@@ -115,16 +117,19 @@ _declaroid() {
             '(-c --config)'{-c,--config}'[Path to the apps YAML config]:file:_files' \
             '--store[Store(s) to search]:store:(gplay fdroid izzyondroid any)' \
             '(-l --limit)'{-l,--limit}'[Max results per store]:limit' \
+            '(-k --dry-run --dryrun)'{-k,--dry-run,--dryrun}'[Print the YAML entry instead of writing it]' \
             '(-h --help)'{-h,--help}'[Show help]'
           ;;
         devices|list)
           _arguments \
             '--sort-by[Sort output]:key:(serial model codename connection)' \
+            '(-k --dry-run --dryrun)'{-k,--dry-run,--dryrun}'[No-op -- this command is already read-only]' \
             '(-h --help)'{-h,--help}'[Show help]'
           ;;
         clear-cache)
           _arguments \
             '(-y --yes --noconfirm --no-confirm)'{-y,--yes,--noconfirm,--no-confirm}'[Skip the confirmation prompt]' \
+            '(-k --dry-run --dryrun)'{-k,--dry-run,--dryrun}'[Print what would be removed instead of removing it]' \
             '(-h --help)'{-h,--help}'[Show help]' \
             '*:package:_declaroid_cached_packages'
           ;;
@@ -137,6 +142,7 @@ _declaroid() {
             '(--no-labels --fast)'{--no-labels,--fast}'[Skip app name resolution]' \
             '(-j --jobs)'{-j,--jobs}'[Resolve up to N app names in parallel]:jobs' \
             '--root-framework[Force which root framework to use]:framework:(apatch magisk)' \
+            '(-k --dry-run --dryrun)'{-k,--dry-run,--dryrun}'[With -o: print instead of writing the file]' \
             '(-h --help)'{-h,--help}'[Show help]'
           ;;
       esac

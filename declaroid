@@ -99,15 +99,19 @@ ${C_BOLD}Commands:${C_RESET}
 ${C_BOLD}Options:${C_RESET}
   ${C_YELLOW}-c, --config FILE${C_RESET}       Path to the apps YAML config (default: ${DEFAULT_CONFIG})
   ${C_YELLOW}-d, --device QUERY${C_RESET}      Target device (also settable via \$TARGET_DEVICE)
-      ${C_YELLOW}--dry-run${C_RESET}           Print what would happen without downloading/installing/uninstalling
-  ${C_YELLOW}-f, --force-download${C_RESET}    (install only) Re-download even if a cached copy exists
-      ${C_YELLOW}--enforce${C_RESET}           (install only) Also uninstall device apps that aren't in the config
+  ${C_YELLOW}-k, --dry-run, --dryrun${C_RESET} Accepted by every command; print what would happen instead of
+                          doing it (apply/uninstall/clear-cache: what would be installed/
+                          removed; add: the YAML entry instead of writing it; generate-config
+                          with -o: print instead of writing the file). A no-op on commands
+                          that are already read-only (devices/diff/modules/search).
+  ${C_YELLOW}-f, --force-download${C_RESET}    (apply only) Re-download even if a cached copy exists
+      ${C_YELLOW}--enforce${C_RESET}           (apply only) Also uninstall device apps that aren't in the config
                           (prompts once per device; see -y below)
-      ${C_YELLOW}--reboot${C_RESET}            (install only) Reboot the target device(s) at the end if any
+      ${C_YELLOW}--reboot${C_RESET}            (apply only) Reboot the target device(s) at the end if any
                           module(s) were installed (no-op otherwise)
   ${C_YELLOW}-y, --yes, --noconfirm, --no-confirm${C_RESET}
-                          (install/install --enforce/uninstall/clear-cache) Skip the confirmation prompt
-  ${C_YELLOW}-v, --verbose${C_RESET}           (install only) Also log each already-installed app as it's
+                          (apply/apply --enforce/uninstall/clear-cache) Skip the confirmation prompt
+  ${C_YELLOW}-v, --verbose${C_RESET}           (apply only) Also log each already-installed app as it's
                           skipped, instead of just a count in the plan
   ${C_YELLOW}-o, --output FILE${C_RESET}       (generate-config only) Write to FILE instead of stdout
       ${C_YELLOW}--system${C_RESET}            (generate-config only) Include system apps too (default: third-party only)
@@ -1703,7 +1707,7 @@ cmd_apply() {
         cli_device="$2"
         shift 2
         ;;
-      --dry-run)
+      -k|--dry-run|--dryrun)
         DRY_RUN=1
         shift
         ;;
@@ -2068,7 +2072,7 @@ cmd_uninstall() {
         cli_device="$2"
         shift 2
         ;;
-      --dry-run)
+      -k|--dry-run|--dryrun)
         DRY_RUN=1
         shift
         ;;
@@ -2153,6 +2157,10 @@ cmd_clear_cache() {
         assume_yes=1
         shift
         ;;
+      -k|--dry-run|--dryrun)
+        DRY_RUN=1
+        shift
+        ;;
       -*)
         log_error "Unknown option: $1"
         usage >&2
@@ -2173,6 +2181,12 @@ cmd_clear_cache() {
 
   if [[ ${#pkgs[@]} -eq 0 ]]
   then
+    if [[ -n "$DRY_RUN" ]]
+    then
+      printf '  would remove entire cache: %s\n' "$CACHE_ROOT"
+      return 0
+    fi
+
     if [[ -z "$assume_yes" ]]
     then
       printf '%sThis will remove the entire APK cache at %s%s\n' "$C_BOLD" "$CACHE_ROOT" "$C_RESET"
@@ -2201,6 +2215,12 @@ cmd_clear_cache() {
     if [[ ! -d "$dir" ]]
     then
       log_skip "$pkg (nothing cached)"
+      continue
+    fi
+
+    if [[ -n "$DRY_RUN" ]]
+    then
+      printf '  would remove %s cache: %s\n' "$pkg" "$dir"
       continue
     fi
 
@@ -2394,6 +2414,11 @@ cmd_search() {
       -l|--limit)
         limit="$2"
         shift 2
+        ;;
+      -k|--dry-run|--dryrun)
+        # Accepted everywhere for scriptability, but this command is
+        # already read-only -- nothing to preview, so it's a no-op here.
+        shift
         ;;
       -*)
         log_error "Unknown option: $1"
@@ -2659,6 +2684,17 @@ add_app_to_config() {
   local default_store
   default_store="$(yq -r '.store // "gplay"' "$config")"
 
+  if [[ -n "$DRY_RUN" ]]
+  then
+    log_step "Would append to $config:"
+    printf -- '- name: "%s"\n  pkg: %s\n' "$name" "$pkg"
+    if [[ "$store" != "$default_store" ]]
+    then
+      printf '  store: %s\n' "$store"
+    fi
+    return 0
+  fi
+
   if [[ "$store" == "$default_store" ]]
   then
     DECLAROID_NAME="$name" DECLAROID_PKG="$pkg" yq -i \
@@ -2678,6 +2714,7 @@ cmd_add() {
   local store="any"
   local limit=10
   local query=""
+  local DRY_RUN=""
 
   while [[ -n "${1:-}" ]]
   do
@@ -2697,6 +2734,10 @@ cmd_add() {
       -l|--limit)
         limit="$2"
         shift 2
+        ;;
+      -k|--dry-run|--dryrun)
+        DRY_RUN=1
+        shift
         ;;
       -*)
         log_error "Unknown option: $1"
@@ -2827,6 +2868,11 @@ cmd_devices() {
       --sort-by)
         sort_by="$2"
         shift 2
+        ;;
+      -k|--dry-run|--dryrun)
+        # Accepted everywhere for scriptability, but this command is
+        # already read-only -- nothing to preview, so it's a no-op here.
+        shift
         ;;
       *)
         log_error "Unknown option: $1"
@@ -3575,6 +3621,7 @@ cmd_generate_config() {
   local resolve_names=1
   local jobs=6
   local cli_root_framework=""
+  local DRY_RUN=""
 
   while [[ -n "${1:-}" ]]
   do
@@ -3590,6 +3637,10 @@ cmd_generate_config() {
       -o|--output)
         output="$2"
         shift 2
+        ;;
+      -k|--dry-run|--dryrun)
+        DRY_RUN=1
+        shift
         ;;
       --system)
         include_system=1
@@ -3957,11 +4008,12 @@ cmd_generate_config() {
     done
   )"
 
-  if [[ -n "$output" ]]
+  if [[ -n "$output" && -z "$DRY_RUN" ]]
   then
     printf '%s\n' "$yaml" > "$output"
     log_ok "Wrote config to $output"
   else
+    [[ -n "$output" ]] && log_step "Would write config to $output"
     printf '%s\n' "$yaml"
   fi
 }
