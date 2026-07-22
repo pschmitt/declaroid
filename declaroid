@@ -2382,7 +2382,8 @@ is_system_plumbing_pkg() {
     com.google.android.hotspot2.osulogin | \
     com.google.android.wfcactivation | \
     com.google.android.apps.accessibility.voiceaccess | \
-    com.google.android.apps.healthdata)
+    com.google.android.apps.healthdata | \
+    com.google.ar.core)
       return 0
       ;;
     *)
