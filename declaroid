@@ -103,6 +103,8 @@ ${C_BOLD}Options:${C_RESET}
   ${C_YELLOW}-f, --force-download${C_RESET}    (install only) Re-download even if a cached copy exists
       ${C_YELLOW}--enforce${C_RESET}           (install only) Also uninstall device apps that aren't in the config
                           (prompts once per device; see -y below)
+      ${C_YELLOW}--reboot${C_RESET}            (install only) Reboot the target device(s) at the end if any
+                          module(s) were installed (no-op otherwise)
   ${C_YELLOW}-y, --yes, --noconfirm, --no-confirm${C_RESET}
                           (install/install --enforce/uninstall/clear-cache) Skip the confirmation prompt
   ${C_YELLOW}-v, --verbose${C_RESET}           (install only) Also log each already-installed app as it's
@@ -216,8 +218,10 @@ present (github/url/local, same as apps), after a plan+confirm step just
 like apps get. \`modules\` itself stays read-only (drift reporting only).
 Neither ever enables/disables/uninstalls a module, and module state
 changes only take effect on next boot for both frameworks -- declaroid
-never reboots a device on its own, so a "reboot required" reminder is
-printed instead after any module install. Framework detection (when
+never reboots a device on its own unless --reboot is given, so a "reboot
+required" reminder is printed instead after any module install (--reboot
+turns that reminder into an actual reboot of the targeted device(s)).
+Framework detection (when
 root.framework isn't set) probes the device directly for the apd/magisk
 CLI, not for either app's package id -- Magisk supports hiding/
 repackaging its own app specifically to evade that kind of check, so it
@@ -1471,6 +1475,7 @@ cmd_install() {
   local VERBOSE=""
   local bulk=""
   local enforce=""
+  local do_reboot=""
   local assume_yes=""
   local cli_root_framework=""
 
@@ -1499,6 +1504,10 @@ cmd_install() {
         ;;
       --enforce)
         enforce=1
+        shift
+        ;;
+      --reboot)
+        do_reboot=1
         shift
         ;;
       -y|--yes|--noconfirm|--no-confirm)
@@ -1686,7 +1695,22 @@ cmd_install() {
 
   if [[ "$MODULES_INSTALLED_COUNT" -gt 0 ]]
   then
-    log_warn "$MODULES_INSTALLED_COUNT module(s) installed -- reboot the device(s) for changes to take effect"
+    if [[ -n "$do_reboot" ]]
+    then
+      local device
+      for device in "${devices[@]}"
+      do
+        if [[ -n "$DRY_RUN" ]]
+        then
+          printf '  would reboot %s\n' "$device" >&2
+        else
+          log_step "Rebooting $device"
+          adb -s "$device" reboot
+        fi
+      done
+    else
+      log_warn "$MODULES_INSTALLED_COUNT module(s) installed -- reboot the device(s) for changes to take effect (or pass --reboot)"
+    fi
   fi
 
   return "$overall_rc"

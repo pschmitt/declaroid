@@ -145,6 +145,7 @@ $ declaroid COMMAND [OPTIONS]
 | `--dry-run` | install, uninstall | Print what would happen, don't do it |
 | `-f, --force-download` | install | Re-download even if a cached copy exists |
 | `--enforce` | install | Also uninstall device apps that aren't in the config (prompts once per device) |
+| `--reboot` | install | Reboot the target device(s) at the end if any module(s) were installed (no-op otherwise) |
 | `-y, --yes, --noconfirm, --no-confirm` | install, install --enforce, uninstall, clear-cache | Skip the confirmation prompt |
 | `-v, --verbose` | install | Also log each already-installed app as it's skipped, instead of just a count in the plan |
 | `-o, --output FILE` | generate-config | Write to FILE instead of stdout |
@@ -313,7 +314,9 @@ for apps (a plan first, then a confirmation prompt, skippable with
 changes only take effect on next boot for both frameworks** -- it doesn't
 reboot the device for you either, so a `WRN ... reboot the device(s) for
 changes to take effect` reminder is printed instead after any module
-install.
+install. Pass `--reboot` to turn that reminder into an actual reboot of
+the targeted device(s) once the run finishes (no-op if no module was
+installed).
 
 Config schema:
 
