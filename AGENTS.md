@@ -338,6 +338,70 @@ incomplete change, not a follow-up.
   `LC_ALL=C` is used elsewhere in this script too (`--sort-by` in
   `cmd_diff`/`cmd_devices`), inherited from before this was found -- same
   quirk likely applies there, just not yet fixed.
+- **`download`/`dl`/`fetch` only ever searches gplay/fdroid/izzyondroid,
+  never github/local/url** -- this isn't an arbitrary restriction, it
+  matches reality: `search`/`add` can only ever surface results from those
+  three stores in the first place (`search_gplay`/`search_fdroid`/
+  `search_izzyondroid` are the only search backends that exist), since
+  github/local/url apps are always hand-configured, never discovered by
+  searching. `cmd_add`'s search+pick logic was extracted into a shared
+  `search_stores` (row-producing) function and a generalized
+  `pick_search_result` (now takes a leading `mode` ("add"/"download") and
+  `context` (config path or output dir) instead of a config-only
+  signature) so `cmd_download` reuses both verbatim instead of duplicating
+  ~35 lines of search accumulation and the whole mktemp-preview-script
+  picker.
+- **`download`'s gplay path reuses `fetch_app` verbatim by shadowing
+  `CURRENT_PKG`/`FORCE_DOWNLOAD` as locals inside `cmd_download`** --
+  same trick `resolve_module_zip` already uses to reuse
+  `fetch_github_release` for modules (see its own comment). `fetch_app`
+  has zero device coupling to begin with (confirmed while building this),
+  so no other changes were needed to make it reusable outside the
+  apply/install path.
+- **`fdroidcl download`'s progress bar goes to its own *stdout*, not
+  stderr** (confirmed empirically, same class of noise as gplaydl's) --
+  but unlike `fetch_app` (which never needs to read gplaydl's stdout at
+  all, since it already knows the cache dir path up front), `download`'s
+  fdroid/izzyondroid path genuinely needs to read fdroidcl's own final
+  "APK available in `<path>`" line, which is *also* on that same stdout,
+  interleaved with the progress noise. `fetch_fdroid_apk` captures both
+  streams with a plain `2>&1` and parses the result afterward -- no live
+  progress display for this path. **The progress updates are
+  `\r`-separated, not `\n`** (confirmed via `xxd` against a real capture)
+  -- `tr '\r' '\n'` first is required before grepping out the final line,
+  or it's all one "line" as far as `sed`/`grep` are concerned.
+- **Do not pipe an external command through `tee /dev/stderr` inside a
+  `$(...)` capture to get "live progress + still capture the output" --
+  confirmed as a real, reproducible corruption bug, not a theoretical
+  risk.** The obvious-looking `out="$(cmd | tee /dev/stderr)"` (tried
+  first for `fetch_fdroid_apk`, to show fdroidcl's download progress live
+  while still capturing its final "APK available in ..." line) silently
+  corrupted stderr output whenever the *whole script's own* stderr was
+  itself redirected to a regular file -- which covers any non-interactive
+  invocation: piped output, `2> log`, a test harness, cron, etc, not just
+  a contrived case. Root cause: `tee`'s `open("/dev/stderr")` (itself
+  `/proc/self/fd/2` on Linux) creates a *new*, independently-offset open
+  file description against the same underlying regular file, rather than
+  reusing the shell's existing fd 2 -- so `tee`'s writes and the rest of
+  the script's own later stderr writes (`log_step`/`log_ok`/etc, all
+  writing through the original fd 2) race and overwrite each other's bytes
+  at arbitrary offsets. Reproduced with a minimal two-marker repro
+  (`echo marker1 >&2; out="$(cmd | tee /dev/stderr)"; echo marker2 >&2`,
+  whole thing redirected to a file): `marker1` and parts of the piped
+  output vanished or landed scrambled/out of order. This does *not*
+  reproduce when stderr is a real terminal (no fixed byte offset to race
+  over) -- which is exactly why it's easy to miss in ad hoc manual
+  testing and only surfaces once something redirects/logs the run.
+  Swapped for a plain `cmd 2>&1` full capture (see `fetch_fdroid_apk`):
+  no live progress, but correct and safe regardless of how the calling
+  script's own stderr is connected.
+- **`fdroidcl download` needs no adb/device at all** -- confirmed by
+  reading fdroidcl's own Go source (`download.go`): it calls
+  `maybeOneDevice()` only to pick the *best-matching* APK variant if a
+  device happens to be connected, and explicitly ignores the error if none
+  is ("don't fail a download if adb is not installed" per its own
+  comment). This is what makes `download` genuinely device-independent,
+  same positioning as `search` ("no device or config needed").
 
 ## Root modules (APatch/Magisk)
 

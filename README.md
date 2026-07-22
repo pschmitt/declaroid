@@ -132,6 +132,7 @@ $ declaroid COMMAND [OPTIONS]
 | `modules` | Show configured root modules (APatch/Magisk) vs what's on the device, read-only (`--full`: also list device modules not in the config; `apply` actually installs a missing one) |
 | `search QUERY` | Search Google Play and/or F-Droid; no device or config needed |
 | `add QUERY` | Search, then append the picked app to the config (fzf picker if more than one match) |
+| `download QUERY`, `dl`, `fetch` | Search, then download the picked app's APK(s) to `-o`/`--output` (default: `.`); no device or config needed |
 | `devices`, `list` | List connected adb devices (serial, model, codename, connection) |
 | `clear-cache [PKG...]` | Remove cached APK downloads, all of them or just the given package(s) |
 | `generate-config`, `dump` | Print a YAML config seeded from what's installed on a device |
@@ -142,20 +143,20 @@ $ declaroid COMMAND [OPTIONS]
 |---|---|---|
 | `-c, --config FILE` | all | Path to the apps YAML config |
 | `-d, --device QUERY` | all | Target device (see [device matching](#device-matching)) |
-| `-k, --dry-run, --dryrun` | all | Print what would happen instead of doing it (apply/uninstall/clear-cache: what would be installed/removed; `add`: the YAML entry instead of writing it; `generate-config` with `-o`: print instead of writing the file). No-op on commands that are already read-only (`devices`/`diff`/`modules`/`search`) |
-| `-f, --force-download` | apply | Re-download even if a cached copy exists |
+| `-k, --dry-run, --dryrun` | all | Print what would happen instead of doing it (apply/uninstall/clear-cache: what would be installed/removed; `add`: the YAML entry instead of writing it; `download`: what would be downloaded; `generate-config` with `-o`: print instead of writing the file). No-op on commands that are already read-only (`devices`/`diff`/`modules`/`search`) |
+| `-f, --force-download` | apply, download | Re-download even if a cached copy exists (gplay only for `download` -- fdroid/izzyondroid cache on fdroidcl's own terms) |
 | `--enforce` | apply | Also uninstall device apps that aren't in the config (prompts once per device); same as config `enforce: true` |
 | `--reboot` | apply | Reboot the target device(s) at the end if any module(s) were installed (no-op otherwise) |
 | `-y, --yes, --noconfirm, --no-confirm` | apply, apply --enforce, uninstall, clear-cache | Skip the confirmation prompt |
 | `-v, --verbose` | apply | Also log each already-installed app as it's skipped, instead of just a count in the plan |
-| `-o, --output FILE` | generate-config | Write to FILE instead of stdout |
+| `-o, --output FILE\|DIR` | generate-config, download | generate-config: write to FILE instead of stdout; download: DIR to save the APK(s) in (default: `.`) |
 | `--system` | generate-config | Include system apps too (default: third-party only) |
 | `--no-labels, --fast` | generate-config | Skip app name resolution, use the package id instead |
 | `-j, --jobs N` | generate-config | Resolve up to N app names in parallel (default: 6) |
 | `--full` | diff, modules | Also list device apps/modules that aren't in the config, as `extra` |
 | `--root-framework apatch\|magisk` | apply, modules, generate-config | Force which root framework to use instead of the config's `root.framework`/auto-detection |
-| `--store gplay\|fdroid\|izzyondroid\|any` | search, add | Which store(s) to search (default: `any`; `izzyondroid` is opt-in, not part of `any`) |
-| `-l, --limit N` | search, add | Max results per store (default: 10) |
+| `--store gplay\|fdroid\|izzyondroid\|any` | search, add, download | Which store(s) to search (default: `any`; `izzyondroid` is opt-in, not part of `any`) |
+| `-l, --limit N` | search, add, download | Max results per store (default: 10) |
 | `--sort-by KEY` | diff, devices | Sort output case-insensitively. diff: `name` (default) or `pkg`. devices: `serial` (default), `model`, `codename`, or `connection` |
 | `--bulk, --all-devices, --all` | all | Target every matching device instead of erroring out on ambiguity |
 | `-h, --help` | all | Show help |
@@ -582,6 +583,38 @@ top-level default (same convention as `generate-config`).
 
 Pass `--dry-run`/`-k`/`--dryrun` to print the YAML entry that would be
 appended to stdout instead of actually writing it to the config file.
+
+### `download`/`dl`/`fetch`: search, then save the APK(s)
+
+`declaroid download QUERY [--store ...] [-o DIR]` runs the exact same
+search+pick as `add` (same fzf picker, just with a "will download to DIR"
+preview instead of "will append to config"), but saves the actual APK
+file(s) locally instead of writing a config entry -- no device, and no
+config file, needed at all:
+
+```console
+$ declaroid download whatsapp --store gplay -o ~/Downloads
+INF Searching Google Play for "whatsapp"
+INF Found: WhatsApp Messenger (com.whatsapp) [gplay]
+INF Downloading com.whatsapp
+OK base.apk -> /home/user/Downloads/
+```
+
+`gplay` downloads go through the same cache as `apply` (`-f`/
+`--force-download` bypasses it the same way too) and may drop more than one
+file (base + split APKs) -- every `*.apk` found in the cache dir is copied
+out. `fdroid`/`izzyondroid` downloads go through `fdroidcl download`
+directly (no adb/device involvement at all, confirmed: it only tries to
+detect a connected device to pick the best-matching variant, and silently
+skips that if none is found) -- always a single file, and `-f`/
+`--force-download` has no effect there since fdroidcl does its own
+download caching internally. `-o`/`--output` defaults to the current
+directory, and is created if it doesn't exist yet. `github`/`local`/`url`
+apps are never reachable here, same as `search`/`add` -- those stores are
+never searched, only hand-configured.
+
+Pass `--dry-run`/`-k`/`--dryrun` to print what would be downloaded and
+where, without actually downloading anything.
 
 ### Table output
 

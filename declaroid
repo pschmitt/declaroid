@@ -89,6 +89,10 @@ ${C_BOLD}Commands:${C_RESET}
   ${C_CYAN}add${C_RESET} QUERY
               Search, then append the picked app to the config (fzf picker
               with a preview of the YAML to be added, if more than one match)
+  ${C_CYAN}download${C_RESET} QUERY (aliases: ${C_CYAN}dl${C_RESET}, ${C_CYAN}fetch${C_RESET})
+              Search, then download the picked app's APK(s) to -o/--output
+              (default: the current directory) -- no device or config
+              needed, same fzf picker as add
   ${C_CYAN}devices${C_RESET}, ${C_CYAN}list${C_RESET}
               List connected adb devices (serial, model, codename, connection)
   ${C_CYAN}clear-cache${C_RESET} [PKG...]
@@ -101,10 +105,13 @@ ${C_BOLD}Options:${C_RESET}
   ${C_YELLOW}-d, --device QUERY${C_RESET}      Target device (also settable via \$TARGET_DEVICE)
   ${C_YELLOW}-k, --dry-run, --dryrun${C_RESET} Accepted by every command; print what would happen instead of
                           doing it (apply/uninstall/clear-cache: what would be installed/
-                          removed; add: the YAML entry instead of writing it; generate-config
-                          with -o: print instead of writing the file). A no-op on commands
-                          that are already read-only (devices/diff/modules/search).
-  ${C_YELLOW}-f, --force-download${C_RESET}    (apply only) Re-download even if a cached copy exists
+                          removed; add: the YAML entry instead of writing it; download:
+                          what would be downloaded; generate-config with -o: print instead
+                          of writing the file). A no-op on commands that are already
+                          read-only (devices/diff/modules/search).
+  ${C_YELLOW}-f, --force-download${C_RESET}    (apply, download) Re-download even if a cached copy exists
+                          (gplay only for download -- fdroid/izzyondroid cache on
+                          fdroidcl's own terms, outside declaroid's control)
       ${C_YELLOW}--enforce${C_RESET}           (apply only) Also uninstall device apps that aren't in the config
                           (prompts once per device; see -y below)
       ${C_YELLOW}--reboot${C_RESET}            (apply only) Reboot the target device(s) at the end if any
@@ -113,7 +120,8 @@ ${C_BOLD}Options:${C_RESET}
                           (apply/apply --enforce/uninstall/clear-cache) Skip the confirmation prompt
   ${C_YELLOW}-v, --verbose${C_RESET}           (apply only) Also log each already-installed app as it's
                           skipped, instead of just a count in the plan
-  ${C_YELLOW}-o, --output FILE${C_RESET}       (generate-config only) Write to FILE instead of stdout
+  ${C_YELLOW}-o, --output FILE|DIR${C_RESET}   (generate-config) Write to FILE instead of stdout;
+                          (download) DIR to save the downloaded APK(s) in (default: .)
       ${C_YELLOW}--system${C_RESET}            (generate-config only) Include system apps too (default: third-party only)
       ${C_YELLOW}--no-labels, --fast${C_RESET} (generate-config only) Skip resolving app names via aapt2, use the package id instead (faster)
   ${C_YELLOW}-j, --jobs N${C_RESET}          (generate-config only) Resolve up to N app names in parallel (default: 6)
@@ -123,9 +131,9 @@ ${C_BOLD}Options:${C_RESET}
                           (apply, modules, generate-config) Force which root framework to
                           use instead of the config's root.framework/auto-detection
       ${C_YELLOW}--store gplay|fdroid|izzyondroid|any${C_RESET}
-                          (search, add) Which store(s) to search (default: any;
+                          (search, add, download) Which store(s) to search (default: any;
                           izzyondroid is opt-in, not part of "any")
-  ${C_YELLOW}-l, --limit N${C_RESET}          (search, add) Max results per store (default: 10)
+  ${C_YELLOW}-l, --limit N${C_RESET}          (search, add, download) Max results per store (default: 10)
       ${C_YELLOW}--sort-by KEY${C_RESET}       (diff, devices) Sort output, case-insensitively.
                           diff: name (default) or pkg. devices: serial
                           (default), model, codename, or connection.
@@ -900,6 +908,66 @@ install_izzyondroid() {
   user_val="$(effective_target_user)"
   [[ -n "$user_val" ]] && user_args=(-user "$user_val")
   ANDROID_SERIAL="$DEVICE_SERIAL" izzyondroid_fdroidcl install "${user_args[@]}" "$CURRENT_PKG"
+}
+
+# Downloads $pkg via `fdroidcl download` (or, when $izzy is non-empty, the
+# isolated IzzyOnDroid wrapper) -- fdroidcl's own cache, not declaroid's
+# ${CACHE_ROOT}, and no adb/device involvement at all (confirmed: fdroidcl's
+# own `download` command works fine with nothing connected, unlike `install`
+# -- it only tries to detect a device to pick the *best-matching* APK
+# variant, and swallows the error if none is found). Used by `download`,
+# which never installs anything.
+#
+# `fdroidcl download`'s own progress bar goes to *its* stdout, not stderr
+# (confirmed empirically), same class of noise as gplaydl's -- and unlike
+# fetch_app (which never needs to read gplaydl's stdout at all), the actual
+# data this function needs -- fdroidcl's own final "APK available in
+# <path>" line -- is *also* on that same stdout, mixed in with the
+# progress noise. Both streams are fully captured (2>&1) and parsed
+# afterward rather than shown live -- **do not** be tempted to
+# `| tee /dev/stderr` here for a live progress bar: confirmed as a real,
+# reproducible corruption bug when the *whole script's* own stderr is
+# itself redirected to a regular file (any non-interactive/logged/piped
+# invocation, not just tests) -- `tee`'s `open("/dev/stderr")` resolves to
+# a *new*, independently-offset open of the same underlying file rather
+# than reusing the shell's existing fd 2, so its writes and the rest of
+# the script's own subsequent stderr writes silently overwrite/interleave
+# each other's bytes at the OS level. Reproduced with a two-line isolated
+# repro (`echo marker >&2; out="$(cmd | tee /dev/stderr)"; echo marker
+# >&2`, redirected to a file): the first marker and parts of the piped
+# output vanished/scrambled. Plain `2>&1` capture has none of this risk.
+# Progress updates are `\r`-separated, not `\n` (confirmed empirically) --
+# `tr '\r' '\n'` first, so the final "APK available in ..." line can be
+# grepped out on its own regardless.
+fetch_fdroid_apk() {
+  local pkg="$1"
+  local izzy="$2"
+
+  local -a fdroidcl_cmd=(fdroidcl)
+  if [[ -n "$izzy" ]]
+  then
+    ensure_izzyondroid_repo
+    fdroidcl_cmd=(izzyondroid_fdroidcl)
+  fi
+
+  local output
+  if ! output="$("${fdroidcl_cmd[@]}" download "$pkg" 2>&1)"
+  then
+    log_error "Failed to download $pkg"
+    printf '%s\n' "$output" >&2
+    return 1
+  fi
+
+  local path
+  path="$(tr '\r' '\n' <<< "$output" | sed -n 's/^APK available in //p' | tail -1)"
+
+  if [[ -z "$path" || ! -e "$path" ]]
+  then
+    log_error "Could not determine downloaded APK path for $pkg"
+    return 1
+  fi
+
+  printf '%s\n' "$path"
 }
 
 install_local() {
@@ -2577,20 +2645,71 @@ cmd_search() {
   } | render_table | colorize_word gplay "$C_BLUE" | colorize_word fdroid "$C_GREEN" | colorize_word izzyondroid "$C_CYAN"
 }
 
-# Interactive fzf picker for `add`'s search matches: one line per match in
-# the list, a preview pane showing the app's info and the exact YAML that
-# would be appended to $config. $default_store is a plain value (looked up
-# once by the caller, same for every row) baked directly into the preview
-# script text -- no per-keystroke yq call needed. Colors/bold/italic are
-# emitted unconditionally here (not gated on $C_*/-t 1 like the rest of the
+# Searches gplay/fdroid/izzyondroid per $store ("gplay"/"fdroid"/
+# "izzyondroid"/"any") and prints matched rows as "name\tpkg\tstore" (one
+# per line) to stdout -- the plain, non-hyperlinked row shape `add`/
+# `download` both act on (unlike cmd_search's own inline accumulation,
+# which additionally embeds OSC 8 hyperlinks for display and so isn't
+# reused here). Shared by cmd_add and cmd_download.
+search_stores() {
+  local query="$1"
+  local limit="$2"
+  local store="$3"
+
+  local -a rows
+  local row name pkg app_store
+
+  if [[ "$store" == gplay || "$store" == any ]]
+  then
+    log_step "Searching Google Play for \"$query\""
+    mapfile -t rows < <(search_gplay "$query" "$limit")
+    for row in "${rows[@]}"
+    do
+      IFS=$'\t' read -r name pkg app_store _ <<< "$row"
+      printf '%s\t%s\t%s\n' "$name" "$pkg" "$app_store"
+    done
+  fi
+
+  if [[ "$store" == fdroid || "$store" == any ]]
+  then
+    log_step "Searching F-Droid for \"$query\""
+    mapfile -t rows < <(search_fdroid "$query" "$limit")
+    for row in "${rows[@]}"
+    do
+      IFS=$'\t' read -r name pkg app_store _ <<< "$row"
+      printf '%s\t%s\t%s\n' "$name" "$pkg" "$app_store"
+    done
+  fi
+
+  if [[ "$store" == izzyondroid ]]
+  then
+    log_step "Searching IzzyOnDroid for \"$query\""
+    mapfile -t rows < <(search_izzyondroid "$query" "$limit")
+    for row in "${rows[@]}"
+    do
+      IFS=$'\t' read -r name pkg app_store _ <<< "$row"
+      printf '%s\t%s\t%s\n' "$name" "$pkg" "$app_store"
+    done
+  fi
+}
+
+# Interactive fzf picker for `add`/`download`'s search matches: one line per
+# match in the list, a preview pane showing the app's info plus an
+# action-specific footer ($mode "add": the exact YAML that would be
+# appended to $context, a config path; $mode "download": the directory
+# it'll download to, $context). $default_store is only meaningful for
+# "add" (decides whether the preview shows an explicit store: line) --
+# "download" passes it empty, unused. Colors/bold/italic are emitted
+# unconditionally here (not gated on $C_*/-t 1 like the rest of the
 # script) because fzf itself requires a real controlling terminal to run at
 # all, so by the time this function is reached we already know stdout is
 # interactive. Prints the chosen row as "name\tpkg\tstore" on success;
 # returns 1 with no output if the user cancels (Esc/Ctrl-C).
 pick_search_result() {
-  local config="$1"
-  local default_store="$2"
-  shift 2
+  local mode="$1"
+  local context="$2"
+  local default_store="$3"
+  shift 3
   local -a match_rows=("$@")
 
   local max_name=0 max_pkg=0
@@ -2635,7 +2754,7 @@ pick_search_result() {
   # "bad pattern"/"command not found" errors from zsh when tried inline).
   # A temp file sidesteps quoting nesting entirely -- fzf just executes it
   # with args, no shell re-parsing of its contents involved.
-  # A non-quoted heredoc so $config/$default_store expand *now* (fixed for
+  # A non-quoted heredoc so $context/$default_store expand *now* (fixed for
   # the whole picker); \$1/\$2/\$3 are escaped so they stay literal, to be
   # filled in from argv when fzf invokes this file with {2} {3} {4}
   # (fzf shell-quotes those substitutions safely, even if a title has
@@ -2661,7 +2780,11 @@ case "\$store" in
     printf '  Store: \033[36m%s\033[0m\n' "\$store"
     ;;
 esac
-printf '\n\033[1m\033[36mWill append to $config:\033[0m\n'
+EOF
+  if [[ "$mode" == add ]]
+  then
+    cat >> "$preview_file" <<EOF
+printf '\n\033[1m\033[36mWill append to $context:\033[0m\n'
 printf '\033[3m  - name: "%s"\033[0m\n' "\$name"
 printf '\033[3m    pkg: %s\033[0m\n' "\$pkg"
 if [[ "\$store" != "$default_store" ]]
@@ -2669,7 +2792,20 @@ then
   printf '\033[3m    store: %s\033[0m\n' "\$store"
 fi
 EOF
+  else
+    cat >> "$preview_file" <<EOF
+printf '\n\033[1m\033[36mWill download to $context:\033[0m\n'
+EOF
+  fi
   chmod +x "$preview_file"
+
+  local header='Multiple matches -- Enter to add, Esc to cancel'
+  local prompt='Add> '
+  if [[ "$mode" == download ]]
+  then
+    header='Multiple matches -- Enter to download, Esc to cancel'
+    prompt='Download> '
+  fi
 
   local selection
   selection="$(printf '%s\n' "${fzf_lines[@]}" | fzf \
@@ -2678,8 +2814,8 @@ EOF
     --with-nth=1 \
     --preview="$preview_file {2} {3} {4}" \
     --preview-window=right:60%:wrap \
-    --header='Multiple matches -- Enter to add, Esc to cancel' \
-    --prompt='Add> ')"
+    --header="$header" \
+    --prompt="$prompt")"
 
   rm -f "$preview_file"
 
@@ -2837,42 +2973,8 @@ cmd_add() {
     check_deps fdroidcl
   fi
 
-  local -a all_rows=()
-  local -a rows
-  local row name pkg app_store
-
-  if [[ "$store" == gplay || "$store" == any ]]
-  then
-    log_step "Searching Google Play for \"$query\""
-    mapfile -t rows < <(search_gplay "$query" "$limit")
-    for row in "${rows[@]}"
-    do
-      IFS=$'\t' read -r name pkg app_store _ <<< "$row"
-      all_rows+=("$name"$'\t'"$pkg"$'\t'"$app_store")
-    done
-  fi
-
-  if [[ "$store" == fdroid || "$store" == any ]]
-  then
-    log_step "Searching F-Droid for \"$query\""
-    mapfile -t rows < <(search_fdroid "$query" "$limit")
-    for row in "${rows[@]}"
-    do
-      IFS=$'\t' read -r name pkg app_store _ <<< "$row"
-      all_rows+=("$name"$'\t'"$pkg"$'\t'"$app_store")
-    done
-  fi
-
-  if [[ "$store" == izzyondroid ]]
-  then
-    log_step "Searching IzzyOnDroid for \"$query\""
-    mapfile -t rows < <(search_izzyondroid "$query" "$limit")
-    for row in "${rows[@]}"
-    do
-      IFS=$'\t' read -r name pkg app_store _ <<< "$row"
-      all_rows+=("$name"$'\t'"$pkg"$'\t'"$app_store")
-    done
-  fi
+  local -a all_rows
+  mapfile -t all_rows < <(search_stores "$query" "$limit" "$store")
 
   if [[ ${#all_rows[@]} -eq 0 ]]
   then
@@ -2891,7 +2993,7 @@ cmd_add() {
     default_store="$(yq -r '.store // "gplay"' "$config")"
 
     local chosen
-    if ! chosen="$(pick_search_result "$config" "$default_store" "${all_rows[@]}")"
+    if ! chosen="$(pick_search_result add "$config" "$default_store" "${all_rows[@]}")"
     then
       log_step "Cancelled"
       return 0
@@ -2900,6 +3002,177 @@ cmd_add() {
   fi
 
   add_app_to_config "$config" "$chosen_name" "$chosen_pkg" "$chosen_store"
+}
+
+# `download`/`dl`/`fetch`: same search+pick flow as `add` (search_stores,
+# pick_search_result in "download" mode), but saves the actual APK file(s)
+# to $output instead of writing a config entry -- no device, no config
+# file required at all (matching `search`'s own "no device or config
+# needed" positioning), since gplay/fdroid/izzyondroid are the only stores
+# `search` can ever surface results from in the first place (github/local/
+# url apps are only ever *configured* by hand, never searched).
+#
+# gplay reuses fetch_app verbatim by shadowing CURRENT_PKG/FORCE_DOWNLOAD
+# locally (same trick resolve_module_zip already uses to reuse
+# fetch_github_release for modules) -- the cache dir it returns may contain
+# multiple split APKs, all of which get copied out. fdroid/izzyondroid go
+# through fetch_fdroid_apk instead (a single APK, fdroidcl doesn't do
+# splits) -- --force-download has no effect there since fdroidcl does its
+# own download caching internally, out of declaroid's control.
+cmd_download() {
+  local store="any"
+  local limit=10
+  local query=""
+  local output="."
+  local FORCE_DOWNLOAD=""
+  local DRY_RUN=""
+
+  while [[ -n "${1:-}" ]]
+  do
+    case "$1" in
+      -h|--help)
+        usage
+        return 0
+        ;;
+      --store)
+        store="$2"
+        shift 2
+        ;;
+      -l|--limit)
+        limit="$2"
+        shift 2
+        ;;
+      -o|--output)
+        output="$2"
+        shift 2
+        ;;
+      -f|--force-download)
+        FORCE_DOWNLOAD=1
+        shift
+        ;;
+      -k|--dry-run|--dryrun)
+        DRY_RUN=1
+        shift
+        ;;
+      -*)
+        log_error "Unknown option: $1"
+        usage >&2
+        return 2
+        ;;
+      *)
+        if [[ -n "$query" ]]
+        then
+          query="$query $1"
+        else
+          query="$1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "$query" ]]
+  then
+    log_error "download requires a query"
+    usage >&2
+    return 2
+  fi
+
+  case "$store" in
+    gplay | fdroid | izzyondroid | any)
+      ;;
+    *)
+      log_error "Invalid --store value: $store (expected gplay, fdroid, izzyondroid, or any)"
+      return 2
+      ;;
+  esac
+
+  check_deps fzf
+
+  if [[ "$store" == gplay || "$store" == any ]]
+  then
+    check_deps gplaydl
+  fi
+
+  if [[ "$store" == fdroid || "$store" == izzyondroid || "$store" == any ]]
+  then
+    check_deps fdroidcl
+  fi
+
+  local -a all_rows
+  mapfile -t all_rows < <(search_stores "$query" "$limit" "$store")
+
+  if [[ ${#all_rows[@]} -eq 0 ]]
+  then
+    log_error "No results found for \"$query\""
+    return 1
+  fi
+
+  local chosen_name chosen_pkg chosen_store
+
+  if [[ ${#all_rows[@]} -eq 1 ]]
+  then
+    IFS=$'\t' read -r chosen_name chosen_pkg chosen_store <<< "${all_rows[0]}"
+    log_step "Found: $chosen_name ($chosen_pkg) [$chosen_store]"
+  else
+    local chosen
+    if ! chosen="$(pick_search_result download "$output" "" "${all_rows[@]}")"
+    then
+      log_step "Cancelled"
+      return 0
+    fi
+    IFS=$'\t' read -r chosen_name chosen_pkg chosen_store <<< "$chosen"
+  fi
+
+  if [[ -n "$DRY_RUN" ]]
+  then
+    printf '  would download %s (%s) [%s] to %s\n' "$chosen_name" "$chosen_pkg" "$chosen_store" "$output"
+    return 0
+  fi
+
+  mkdir -p "$output"
+
+  local -a src_files=()
+  case "$chosen_store" in
+    gplay)
+      local CURRENT_PKG="$chosen_pkg"
+      local cache_dir
+      if ! cache_dir="$(fetch_app)"
+      then
+        return 1
+      fi
+      mapfile -t src_files < <(find "$cache_dir" -maxdepth 1 -iname '*.apk' | sort)
+      ;;
+    fdroid)
+      local path
+      if ! path="$(fetch_fdroid_apk "$chosen_pkg" "")"
+      then
+        return 1
+      fi
+      src_files=("$path")
+      ;;
+    izzyondroid)
+      local path
+      if ! path="$(fetch_fdroid_apk "$chosen_pkg" "1")"
+      then
+        return 1
+      fi
+      src_files=("$path")
+      ;;
+  esac
+
+  if [[ ${#src_files[@]} -eq 0 ]]
+  then
+    log_error "No APK file(s) found for $chosen_pkg"
+    return 1
+  fi
+
+  local f
+  for f in "${src_files[@]}"
+  do
+    cp -f "$f" "$output/"
+    log_ok "$(basename "$f") -> $output/"
+  done
 }
 
 cmd_devices() {
@@ -4123,6 +4396,9 @@ main() {
       ;;
     add)
       cmd_add "$@"
+      ;;
+    download|dl|fetch)
+      cmd_download "$@"
       ;;
     generate-config|dump)
       cmd_generate_config "$@"

@@ -61,6 +61,9 @@ _declaroid_commands() {
     'modules:Show configured vs installed root modules (APatch/Magisk), no changes made'
     'search:Search Google Play and/or F-Droid'
     'add:Search, then append the picked app to the config'
+    'download:Search, then download the picked app'\''s APK(s)'
+    'dl:Alias for download'
+    'fetch:Alias for download'
     'devices:List connected adb devices'
     'list:Alias for devices'
     'clear-cache:Remove cached APK downloads'
@@ -118,6 +121,15 @@ _declaroid() {
             '--store[Store(s) to search]:store:(gplay fdroid izzyondroid any)' \
             '(-l --limit)'{-l,--limit}'[Max results per store]:limit' \
             '(-k --dry-run --dryrun)'{-k,--dry-run,--dryrun}'[Print the YAML entry instead of writing it]' \
+            '(-h --help)'{-h,--help}'[Show help]'
+          ;;
+        download|dl|fetch)
+          _arguments \
+            '(-o --output)'{-o,--output}'[Directory to save the downloaded APK(s) in]:directory:_files -/' \
+            '--store[Store(s) to search]:store:(gplay fdroid izzyondroid any)' \
+            '(-l --limit)'{-l,--limit}'[Max results per store]:limit' \
+            '(-f --force-download)'{-f,--force-download}'[Re-download even if a cached copy exists (gplay only)]' \
+            '(-k --dry-run --dryrun)'{-k,--dry-run,--dryrun}'[Print what would be downloaded instead of downloading]' \
             '(-h --help)'{-h,--help}'[Show help]'
           ;;
         devices|list)
