@@ -1,0 +1,28 @@
+obtainium_auto_track: true
+
+apps:
+  - name: A
+    pkg: com.example.a
+    store: github
+    repo: example/a
+
+  - name: B
+    pkg: com.example.b
+    store: github
+    repo: example/b
+    obtainium: false
+
+  - name: C
+    pkg: com.example.c
+    store: gplay
+
+  - name: D
+    pkg: com.example.d
+    store: github
+    repo: example/d
+
+obtainium:
+  - pkg: com.example.a
+    url: "https://github.com/example/a-custom"
+    settings:
+      includePrereleases: true

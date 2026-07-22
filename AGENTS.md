@@ -59,17 +59,44 @@ incomplete change, not a follow-up.
   genuinely computed/local (a resolved cache dir, a list of matched APK
   files) should stay real function arguments, not `CURRENT_*` -- that
   convention is specifically for per-app config data and run-wide context.
-- **The TSV-ish rows `app_rows` emits are joined with `§` (U+00A7), not a
-  real tab.** `repo`/`asset`/`path` are legitimately empty for most stores,
-  and bash's `read` collapses consecutive *whitespace* IFS delimiters --
-  tab included -- no matter what you set `IFS` to; there is no way to make
-  `IFS=$'\t' read` preserve an empty field between two tabs. This silently
-  shifted every field after the first empty one, which broke `github` and
-  `local` (both depend on fields that are empty for other stores) while
-  `gplay`/`fdroid` looked fine, since neither of them reads the
-  shifted-into-garbage fields. If you add a new per-app config field, put it
-  in `app_rows`'s `join("§")` list and read it out with `IFS='§' read`
-  (already done in `for_each_app` and `cmd_diff`) -- never `IFS=$'\t'`.
+- **The TSV-ish rows `app_rows`/`module_rows`/`obtainium_rows`/etc emit are
+  joined with `$ROW_SEP` (a single raw byte, ASCII Unit Separator `0x1F`),
+  never a real tab and, as of this codebase's own CI investigation, never
+  a printable character like `§` either.** `repo`/`asset`/`path` are
+  legitimately empty for most stores, and bash's `read` collapses
+  consecutive *whitespace* IFS delimiters -- tab included -- no matter
+  what you set `IFS` to; there is no way to make `IFS=$'\t' read` preserve
+  an empty field between two tabs. This silently shifted every field after
+  the first empty one, which broke `github` and `local` (both depend on
+  fields that are empty for other stores) while `gplay`/`fdroid` looked
+  fine, since neither of them reads the shifted-into-garbage fields. If
+  you add a new per-app config field, put it in the relevant `*_rows`
+  function's `join(...)` list (via the same `'"$ROW_SEP"'` quote-splice
+  used everywhere else there -- `$ROW_SEP` can't be interpolated directly
+  into a single-quoted yq expression) and read it out with `IFS="$ROW_SEP"
+  read` -- never `IFS=$'\t'`, and never a literal printable separator
+  character either, per the next bullet.
+- **`§` (U+00A7) was the original row separator here, and is a real,
+  shipped, locale-dependent bug, not just a style choice -- caught only by
+  adding a `nix flake check`-driven bats suite (see "Testing / CI" below)
+  and noticing it failed in that sandboxed build but not in an interactive
+  dev shell.** `§` is 2 bytes in UTF-8 (`0xC2 0xA7`); under a UTF-8 locale
+  bash's IFS field-splitting correctly treats it as one delimiter
+  character, but under a non-UTF-8 locale (`LC_ALL=C`, the Nix build
+  sandbox's default, and also common for cron jobs/systemd services/
+  minimal containers) bash splits on *each of its two raw bytes
+  independently*, inserting a silent extra empty field and shifting
+  everything after it over by one -- reproduced directly: `IFS='§' read -r
+  a b c d <<< "x§y§z§w"` yields `b=""` under `LC_ALL=C` but the correct
+  `b="y"` under a UTF-8 locale. Fixed by switching every row separator in
+  this file from `§` to `$ROW_SEP` (declared once, near the top of the
+  file, as `$'\x1f'`) -- a single byte has no multi-byte encoding to begin
+  with, so it's immune to locale entirely, not just fixed for the common
+  case. If you're ever tempted to reach for another printable-character
+  separator here (`|`, `☃`, whatever) for readability during
+  debugging: don't -- this is exactly the class of bug that hides
+  perfectly under every interactive shell you'll ever test in and only
+  shows up on a caller with a different locale.
 - **Don't use `compgen`.** Nixpkgs' plain `bash` (what the packaged
   `declaroid` actually runs under once wrapped) is built without
   programmable-completion support, so `compgen` doesn't exist there even
@@ -585,8 +612,8 @@ incomplete change, not a follow-up.
   `root.enabled: false` set: it still queried the device and returned
   results). Fixed by comparing directly (`.root.enabled == false`)
   instead of coalescing with `//` -- the third time this exact class of
-  bug has shown up in this file (see the `asset: ''` and the `§`-vs-tab
-  entries above): jq/yq's `//` cannot distinguish "present but falsy"
+  bug has shown up in this file (see the `asset: ''` and the `$ROW_SEP`-
+  vs-tab entries above): jq/yq's `//` cannot distinguish "present but falsy"
   from "absent," so never reach for it when that distinction matters.
 - `cmd_modules` stays read-only (drift reporting only, same shape as
   `cmd_diff`) -- but `apply` *does* install missing modules now (see
@@ -630,7 +657,7 @@ incomplete change, not a follow-up.
   ... | join(...)` over an empty/absent list** -- confirmed empirically
   and it's specifically about `join(...)` being the final step: `.apps[]`
   (or `.modules[]`) alone over `[]` correctly produces zero output, but
-  piping that through `[...] | join("§")` produces exactly one blank
+  piping that through `[...] | join("'"$ROW_SEP"'")` produces exactly one blank
   line instead of nothing. Every row-consuming loop over `app_rows`/
   `module_rows` (`for_each_app`, `for_each_module`, `build_install_plan`,
   `build_module_plan`, `cmd_diff`) now guards against this (`[[ -z "$row"
@@ -941,6 +968,64 @@ incomplete change, not a follow-up.
   issue (a first, wrong hypothesis) -- `filterApks` with no
   `apkFilterRegEx` set just passes every apk-like asset through
   unfiltered, it doesn't error on ambiguity.
+
+## Testing / CI
+
+- **`nix develop`** provides everything needed to lint/test locally:
+  `shellcheck`, `nixfmt`, `statix`, `actionlint`, `bats`, plus declaroid's
+  own runtime deps (`android-tools`, `yq-go`, `jq`, `aapt`, `fdroidcl`,
+  `fzf` -- not `gplaydl`, deliberately: it's a whole extra Python
+  derivation and nothing in the test suite needs `store: gplay`).
+- **`nix flake check`** builds three checks -- `shellcheck` (`bash -n` +
+  `shellcheck` against `declaroid` and every file under `tests/`),
+  `actionlint` (against `.github/workflows/ci.yml`), and `bats-unit` (the
+  whole `tests/unit` suite) -- and is deliberately run with no LANG/
+  LC_ALL override. That's not an oversight: the Nix build sandbox's
+  effectively-`C` locale is exactly what caught the real `$ROW_SEP`/`§`
+  locale bug documented above, and pinning a UTF-8 locale here would mask
+  any future regression of that same class instead of catching it.
+- **`tests/unit/`** is a bats suite covering the pure config/yq logic that
+  doesn't need a device at all: `resolve_config` (the `imports:`
+  concatenation + scalar-override cascade), `app_rows`, `obtainium_rows`/
+  `effective_obtainium_rows`, and `list_extra_pkgs`. Each `.bats` file
+  `source`s the real `declaroid` script (via `helpers/load_declaroid.bash`)
+  and calls its functions directly against fixture YAML under
+  `fixtures/<function>/` -- `main` is a no-op when sourced, since it's
+  guarded by `[[ "${BASH_SOURCE[0]}" == "${0}" ]]`, which is only true for
+  a direct execve, never a `source`. `list_extra_pkgs.bats` stubs `adb` as
+  a plain bash *function* defined in `setup()`, not a PATH-prepended
+  external script -- a function is resolved before any `$PATH` lookup, so
+  it works identically whether or not the environment has a real `adb` or
+  even `/usr/bin/env` (the Nix build sandbox notably has neither).
+- **`tests/e2e/`** is a bats suite that runs the real built binary against
+  a real device/emulator (numbered `01_`/`02_`/`03_` -- bats runs `.bats`
+  files in that order, and each file's state depends on the previous
+  one: install, then enforce, then uninstall, against the same live
+  device within one job). Deliberately avoids `store: gplay` (no Play
+  Store on a bare AVD) -- Obtainium itself installs via `store: github`
+  directly (`ImranR98/Obtainium`, same asset regex `generate-config`'s
+  `known_pkg_override` uses) rather than `store: fdroid`, so the suite
+  doesn't need a real F-Droid index sync either. `$GITHUB_TOKEN` (CI's
+  ambient one is fine, no extra secret needed) keeps `install_github`'s
+  GitHub API calls off the unauthenticated rate limit. Run locally against
+  a real connected device with `DECLAROID_BIN=/path/to/declaroid bats
+  tests/e2e` -- but note this really does install/enforce/uninstall for
+  real; don't point it at a device with anything you care about still on
+  it. (This is exactly why CI runs it against a disposable emulator,
+  never real hardware.)
+- **`.github/workflows/ci.yml`** has two jobs: `checks` (the `nix flake
+  check`/`nixfmt --check`/`statix check` trio, cheap, every push/PR) and
+  `e2e` (boots a real AVD via `reactivecircus/android-emulator-runner`,
+  `nix build`s `declaroid` + `bats`, then runs `tests/e2e` against it --
+  slower, but runs on every push/PR too, since that's the only tier that
+  actually exercises real `adb install`/`--enforce`/Obtainium-JSON-seeding
+  code paths, which is exactly the class of bug that kept slipping through
+  earlier in this file *despite* being live-tested, just never through an
+  automated, repeatable harness). The AVD is cached (keyed on api-level/
+  target/arch) with a one-time warm-up run to populate the cache on a miss,
+  matching `reactivecircus/android-emulator-runner`'s own recommended
+  pattern -- without it, every single run pays the emulator's full cold
+  boot time.
 
 ## Nix packaging
 

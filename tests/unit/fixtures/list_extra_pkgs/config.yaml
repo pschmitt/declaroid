@@ -1,0 +1,7 @@
+apps:
+  - name: A
+    pkg: com.example.a
+
+obtainium:
+  - pkg: com.example.tracked
+    url: "https://github.com/example/tracked"

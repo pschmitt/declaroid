@@ -1,0 +1,8 @@
+obtainium:
+  - pkg: com.example.a
+    url: "https://github.com/example/a"
+
+  - pkg: com.example.b
+    url: "https://github.com/example/b"
+    settings:
+      includePrereleases: true

@@ -938,10 +938,37 @@ it's vendored here at `pkgs/gplaydl`; `fdroidcl` and everything else are
 pulled straight from nixpkgs).
 
 ```console
+$ nix develop         # shellcheck, nixfmt, statix, actionlint, bats, + runtime deps
 $ nix build .#declaroid
-$ nix flake check   # if/when checks are added
-$ shellcheck declaroid
+$ nix flake check     # bash -n + shellcheck + actionlint + the bats unit suite
+$ statix check .
 ```
+
+### Tests
+
+- `tests/unit/` -- a [bats](https://github.com/bats-core/bats-core) suite
+  covering the pure config/yq logic (`resolve_config`'s `imports:`
+  handling, `app_rows`, `obtainium_rows`/`effective_obtainium_rows`,
+  `list_extra_pkgs`) against fixture YAML, no device needed. Runs as part
+  of `nix flake check`, or directly:
+
+  ```console
+  $ nix develop --command bats tests/unit
+  ```
+
+- `tests/e2e/` -- a bats suite that runs the real built binary against a
+  real device or emulator: installs an app, `--enforce`-removes an
+  unconfigured one, seeds an Obtainium repo, then uninstalls. CI runs this
+  against a disposable emulator (see
+  [`.github/workflows/ci.yml`](./.github/workflows/ci.yml)). To run it
+  locally against a real connected device -- **this genuinely
+  installs/uninstalls apps and enforces the test config, so only point it
+  at a device you don't mind being modified**:
+
+  ```console
+  $ nix build .#declaroid -o result
+  $ DECLAROID_BIN=./result/bin/declaroid nix develop --command bats tests/e2e
+  ```
 
 Keep this README in sync with the script's actual behavior -- see
 [AGENTS.md](./AGENTS.md).

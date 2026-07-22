@@ -1,0 +1,12 @@
+enforce: true
+
+apps:
+  - name: Obtainium
+    pkg: dev.imranr.obtainium.fdroid
+    store: github
+    repo: ImranR98/Obtainium
+    asset: 'app-release\.apk$'
+
+obtainium:
+  - pkg: org.breezyweather
+    url: "https://github.com/breezy-weather/breezy-weather"

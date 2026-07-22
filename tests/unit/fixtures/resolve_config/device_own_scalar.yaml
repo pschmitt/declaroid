@@ -1,0 +1,8 @@
+imports:
+  - base.yaml
+
+store: local
+
+apps:
+  - name: Device App
+    pkg: com.example.device

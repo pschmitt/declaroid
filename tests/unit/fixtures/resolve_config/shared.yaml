@@ -1,0 +1,5 @@
+store: fdroid
+
+apps:
+  - name: Shared App
+    pkg: com.example.shared

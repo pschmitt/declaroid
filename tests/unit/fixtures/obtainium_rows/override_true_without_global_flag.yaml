@@ -1,0 +1,6 @@
+apps:
+  - name: E
+    pkg: com.example.e
+    store: github
+    repo: example/e
+    obtainium: true

@@ -1,0 +1,7 @@
+store: gplay
+enforce: true
+grant_permissions: true
+
+apps:
+  - name: Base App
+    pkg: com.example.base

@@ -1,0 +1,22 @@
+store: fdroid
+profile: 0
+
+apps:
+  - name: A
+    pkg: com.example.a
+
+  - name: B
+    pkg: com.example.b
+    store: github
+    repo: example/b
+    profile: all
+
+  - name: C
+    pkg: com.example.c
+    state:
+      installed: false
+
+  - name: D
+    pkg: com.example.d
+    state:
+      disabled: true

@@ -5,6 +5,23 @@ set -euo pipefail
 DEFAULT_CONFIG="${DECLAROID_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/declaroid/apps.yaml}"
 CACHE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/declaroid"
 
+# Row separator for every internal "yq -r '... | join(...)'" /
+# "IFS=... read -r ..." row-passing idiom in this file (app_rows,
+# module_rows, obtainium_rows, etc). A single raw byte (ASCII Unit
+# Separator, 0x1F), not a printable character like § -- confirmed as a
+# real, locale-dependent bug, not just a style choice: § is 2 bytes in
+# UTF-8, and under a non-UTF-8 locale (`LC_ALL=C`, common for cron/
+# systemd services/minimal containers, and notably the Nix build sandbox
+# used by this repo's own `nix flake check`), bash's IFS field-splitting
+# treats a multi-byte IFS *character* as that many separate single-byte
+# delimiters, silently inserting an extra empty field and shifting
+# everything after it over by one -- reproduced directly: `IFS="$ROW_SEP" read -r
+# a b c d <<< "x§y§z§w"` yields b="" under `LC_ALL=C` but the correct
+# "y" under a UTF-8 locale. A single-byte separator has no multi-byte
+# encoding to begin with, so it's immune to this regardless of the
+# caller's locale, not just fixed for the common case.
+ROW_SEP=$'\x1f'
+
 # Populated by load_profile_aliases from the config's top-level `profiles:`
 # list (name -> id). Declared here (not just inside load_profile_aliases)
 # so effective_target_user can safely reference it even before it's been
@@ -723,13 +740,13 @@ load_profile_aliases() {
   PROFILE_ALIASES=()
 
   local -a lines
-  mapfile -t lines < <(yq -r '(.profiles // [])[] | [.name, .id] | join("§")' "$config")
+  mapfile -t lines < <(yq -r '(.profiles // [])[] | [.name, .id] | join("'"$ROW_SEP"'")' "$config")
 
   local line name id
   for line in "${lines[@]}"
   do
     [[ -z "$line" ]] && continue
-    IFS='§' read -r name id <<< "$line"
+    IFS="$ROW_SEP" read -r name id <<< "$line"
     [[ -n "$name" ]] && PROFILE_ALIASES["$name"]="$id"
   done
 }
@@ -1263,7 +1280,7 @@ module_rows() {
 
   # shellcheck disable=SC2016
   yq -r '(.modules // [])[] |
-    [.id, (.name // .id), (.source // "github"), (.repo // ""), (.asset // "\\.zip$"), (.url // ""), (.path // "")] | join("§")' "$config"
+    [.id, (.name // .id), (.source // "github"), (.repo // ""), (.asset // "\\.zip$"), (.url // ""), (.path // "")] | join("'"$ROW_SEP"'")' "$config"
 }
 
 # Same convention as for_each_app -- see its comment. Calls module_fn (a
@@ -1290,7 +1307,7 @@ for_each_module() {
     # Without this guard, a modules-less or `modules: []` config would spin
     # up one phantom iteration with every CURRENT_MODULE_* field empty.
     [[ -z "$row" ]] && continue
-    IFS='§' read -r CURRENT_MODULE_ID CURRENT_MODULE_NAME CURRENT_MODULE_SOURCE CURRENT_MODULE_REPO CURRENT_MODULE_ASSET CURRENT_MODULE_URL CURRENT_MODULE_PATH <<< "$row"
+    IFS="$ROW_SEP" read -r CURRENT_MODULE_ID CURRENT_MODULE_NAME CURRENT_MODULE_SOURCE CURRENT_MODULE_REPO CURRENT_MODULE_ASSET CURRENT_MODULE_URL CURRENT_MODULE_PATH <<< "$row"
 
     if ! "$module_fn"
     then
@@ -1532,7 +1549,7 @@ build_module_plan() {
   do
     # See for_each_module's comment on the same guard.
     [[ -z "$row" ]] && continue
-    IFS='§' read -r id name source rest <<< "$row"
+    IFS="$ROW_SEP" read -r id name source rest <<< "$row"
 
     if is_module_installed "$DEVICE_SERIAL" "$id"
     then
@@ -1892,7 +1909,7 @@ app_rows() {
   yq -r '(.store // "gplay") as $ds |
     (.profile // "") as $dp |
     .apps[] |
-    [.name, .pkg, (.store // $ds), (.repo // ""), (.asset // "\\.apk$"), (.path // ""), (.profile // $dp), (.url // ""), ((.state.installed == false) | not), (.state.disabled == true)] | join("§")' "$config"
+    [.name, .pkg, (.store // $ds), (.repo // ""), (.asset // "\\.apk$"), (.path // ""), (.profile // $dp), (.url // ""), ((.state.installed == false) | not), (.state.disabled == true)] | join("'"$ROW_SEP"'")' "$config"
 }
 
 # Calls app_fn (a zero-arg function; see install_app's comment) once per
@@ -1904,7 +1921,7 @@ for_each_app() {
   local app_fn="$2"
   local failures=0
 
-  while IFS='§' read -r CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE CURRENT_URL CURRENT_STATE_INSTALLED CURRENT_STATE_DISABLED <&3
+  while IFS="$ROW_SEP" read -r CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE CURRENT_URL CURRENT_STATE_INSTALLED CURRENT_STATE_DISABLED <&3
   do
     # yq -r emits one blank line, not zero output, for `.apps[] | ... |
     # join(...)` over an empty/absent apps: list (same quirk documented on
@@ -1955,7 +1972,7 @@ build_install_plan() {
   do
     # See for_each_app's comment on the same guard.
     [[ -z "$row" ]] && continue
-    IFS='§' read -r name pkg store _repo _asset _path _profile _url state_installed _state_disabled <<< "$row"
+    IFS="$ROW_SEP" read -r name pkg store _repo _asset _path _profile _url state_installed _state_disabled <<< "$row"
 
     [[ "$state_installed" == false ]] && continue
 
@@ -1984,7 +2001,7 @@ build_removal_plan() {
   for row in "${rows[@]}"
   do
     [[ -z "$row" ]] && continue
-    IFS='§' read -r name pkg _store _repo _asset _path _profile _url state_installed _state_disabled <<< "$row"
+    IFS="$ROW_SEP" read -r name pkg _store _repo _asset _path _profile _url state_installed _state_disabled <<< "$row"
 
     if [[ "$state_installed" == false ]] && is_installed "$DEVICE_SERIAL" "$pkg"
     then
@@ -3704,7 +3721,7 @@ cmd_diff() {
     {
       printf 'NAME\tPKG\tSTORE\tSTATUS\n'
       {
-        while IFS='§' read -r CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE CURRENT_URL CURRENT_STATE_INSTALLED CURRENT_STATE_DISABLED <&3
+        while IFS="$ROW_SEP" read -r CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE CURRENT_URL CURRENT_STATE_INSTALLED CURRENT_STATE_DISABLED <&3
         do
           # See for_each_app's comment on the same guard.
           [[ -z "$CURRENT_PKG" ]] && continue
@@ -3849,7 +3866,7 @@ cmd_modules() {
   mapfile -t devices <<< "$devices_raw"
 
   local -a configured_rows
-  mapfile -t configured_rows < <(yq -r '(.modules // [])[] | [.id, (.name // .id)] | join("§")' "$config")
+  mapfile -t configured_rows < <(yq -r '(.modules // [])[] | [.id, (.name // .id)] | join("'"$ROW_SEP"'")' "$config")
 
   local DEVICE_SERIAL framework
   for DEVICE_SERIAL in "${devices[@]}"
@@ -3871,7 +3888,7 @@ cmd_modules() {
         local crow cid cname drow did dname dversion denabled found
         for crow in "${configured_rows[@]}"
         do
-          IFS='§' read -r cid cname <<< "$crow"
+          IFS="$ROW_SEP" read -r cid cname <<< "$crow"
           found=""
 
           for drow in "${device_rows[@]}"
@@ -3896,7 +3913,7 @@ cmd_modules() {
             found=""
             for crow in "${configured_rows[@]}"
             do
-              IFS='§' read -r cid cname <<< "$crow"
+              IFS="$ROW_SEP" read -r cid cname <<< "$crow"
               [[ "$did" == "$cid" ]] && found=1 && break
             done
             [[ -n "$found" ]] && continue
@@ -3947,11 +3964,12 @@ store_for_installer() {
 # packageinstaller/null just like any manually-installed APK). Used by
 # generate-config to emit a concrete, working entry for these specific
 # packages instead of the usual "store unknown"/empty-repo placeholder.
-# Emits store§url§repo§asset (unused fields for a given store are empty).
+# Emits store/url/repo/asset joined by ROW_SEP (unused fields for a given
+# store are empty).
 known_pkg_override() {
   case "$1" in
     org.fdroid.fdroid)
-      printf 'url§https://f-droid.org/F-Droid.apk§§\n'
+      printf 'url%shttps://f-droid.org/F-Droid.apk%s%s\n' "$ROW_SEP" "$ROW_SEP" "$ROW_SEP"
       ;;
     dev.imranr.obtainium.fdroid | dev.imranr.obtainium)
       # jq/yq test() matches this as a substring of the filename, not
@@ -3959,7 +3977,7 @@ known_pkg_override() {
       # match e.g. app-arm64-v8a-release.apk -- verified against a real
       # release (github.com/ImranR98/Obtainium, tag v1.6.10): matches
       # exactly app-release.apk, nothing else, out of ~30 assets.
-      printf 'github§§ImranR98/Obtainium§app-release\\.apk$\n'
+      printf 'github%s%sImranR98/Obtainium%sapp-release\\.apk$\n' "$ROW_SEP" "$ROW_SEP" "$ROW_SEP"
       ;;
     com.topjohnwu.magisk)
       # Magisk itself is never on Google Play or F-Droid -- it's normally
@@ -3970,7 +3988,7 @@ known_pkg_override() {
       # the last 5 releases, both assets present every time), so the
       # default would match both and error out at install time -- this
       # pattern narrows it to just the versioned release build.
-      printf 'github§§topjohnwu/Magisk§^Magisk-v.*\\.apk$\n'
+      printf 'github%s%stopjohnwu/Magisk%s^Magisk-v.*\\.apk$\n' "$ROW_SEP" "$ROW_SEP" "$ROW_SEP"
       ;;
     *)
       return 1
@@ -4154,7 +4172,7 @@ obtainium_rows() {
   local config="$1"
 
   # shellcheck disable=SC2016
-  yq -r '(.obtainium // [])[] | [.pkg, .url, (.settings // {} | to_json(0))] | join("§")' "$config"
+  yq -r '(.obtainium // [])[] | [.pkg, .url, (.settings // {} | to_json(0))] | join("'"$ROW_SEP"'")' "$config"
 }
 
 # Combines explicit obtainium: rows (obtainium_rows, always included and
@@ -4181,7 +4199,7 @@ effective_obtainium_rows() {
   for row in "${explicit_rows[@]}"
   do
     [[ -z "$row" ]] && continue
-    IFS='§' read -r pkg _ _ <<< "$row"
+    IFS="$ROW_SEP" read -r pkg _ _ <<< "$row"
     seen["$pkg"]=1
     printf '%s\n' "$row"
   done
@@ -4191,13 +4209,13 @@ effective_obtainium_rows() {
 
   local -a github_apps
   # shellcheck disable=SC2016
-  mapfile -t github_apps < <(yq -r '.apps[] | select(.store == "github") | [.pkg, .repo, has("obtainium"), (.obtainium // false)] | join("§")' "$config")
+  mapfile -t github_apps < <(yq -r '.apps[] | select(.store == "github") | [.pkg, .repo, has("obtainium"), (.obtainium // false)] | join("'"$ROW_SEP"'")' "$config")
 
   local repo has_override override_val effective
   for row in "${github_apps[@]}"
   do
     [[ -z "$row" ]] && continue
-    IFS='§' read -r pkg repo has_override override_val <<< "$row"
+    IFS="$ROW_SEP" read -r pkg repo has_override override_val <<< "$row"
     [[ -n "${seen[$pkg]:-}" ]] && continue
     [[ -z "$repo" ]] && continue
 
@@ -4210,7 +4228,7 @@ effective_obtainium_rows() {
     [[ "$effective" != true ]] && continue
 
     seen["$pkg"]=1
-    printf '%s§https://github.com/%s§{}\n' "$pkg" "$repo"
+    printf '%s%shttps://github.com/%s%s{}\n' "$pkg" "$ROW_SEP" "$repo" "$ROW_SEP"
   done
 }
 
@@ -4421,7 +4439,7 @@ sync_obtainium_repos() {
   for row in "${rows[@]}"
   do
     [[ -z "$row" ]] && continue
-    IFS='§' read -r pkg url settings_json <<< "$row"
+    IFS="$ROW_SEP" read -r pkg url settings_json <<< "$row"
 
     if [[ -n "$(obtainium_shell "$device" "$use_root" "[ -e '$app_data_dir/$pkg.json' ] && echo yes")" ]]
     then
@@ -4949,7 +4967,7 @@ cmd_generate_config() {
       store_asset=""
       if override="$(known_pkg_override "$pkg")"
       then
-        IFS='§' read -r store store_url store_repo store_asset <<< "$override"
+        IFS="$ROW_SEP" read -r store store_url store_repo store_asset <<< "$override"
       else
         store="$(store_for_installer "$installer")"
       fi
