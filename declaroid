@@ -545,6 +545,48 @@ resolve_devices() {
   return 1
 }
 
+# The teardown mirror of adb.start_cmd: if the config sets `adb.auto_stop:
+# true`, runs `adb.stop_cmd` (also an arbitrary shell command, via `bash
+# -c`) once a command's real device work is done -- e.g. to disconnect
+# wireless adb again after `apply` finishes. No-op if either isn't set.
+# Deliberately best-effort/fire-and-forget: a failing stop_cmd only logs,
+# it never changes the calling command's own exit status -- tearing down
+# the connection is cleanup, not something worth failing an otherwise-
+# successful apply/uninstall/diff/modules/generate-config run over.
+# Respects dry_run (the caller's own $DRY_RUN, passed explicitly since this
+# isn't itself part of the CURRENT_*/DEVICE_SERIAL dynamic-scope
+# convention) the same way start_cmd's own retry does: preview only, don't
+# actually run it.
+maybe_run_adb_stop_cmd() {
+  local config="$1"
+  local dry_run="$2"
+
+  [[ -n "$config" && -f "$config" ]] || return 0
+
+  local auto_stop
+  auto_stop="$(yq -r '.adb.auto_stop == true' "$config")"
+  [[ "$auto_stop" == true ]] || return 0
+
+  local stop_cmd
+  stop_cmd="$(yq -r '.adb.stop_cmd // ""' "$config")"
+  [[ "$stop_cmd" == "null" ]] && stop_cmd=""
+  [[ -n "$stop_cmd" ]] || return 0
+
+  if [[ -n "$dry_run" ]]
+  then
+    printf '  would run adb.stop_cmd\n' >&2
+    return 0
+  fi
+
+  log_step "Running adb.stop_cmd"
+  # See resolve_devices's start_cmd comment -- stdout redirected to stderr
+  # for the same reason, even though this function's own return value
+  # isn't captured by any caller (nothing downstream reads it), purely so
+  # a future caller that *does* capture output can't be bitten by the same
+  # class of bug.
+  bash -c "$stop_cmd" >&2
+}
+
 is_installed() {
   local device="$1"
   local pkg="$2"
@@ -1981,10 +2023,12 @@ cmd_apply() {
     fi
   fi
 
+  maybe_run_adb_stop_cmd "$config" "$DRY_RUN"
+
   return "$overall_rc"
 }
 
-# `install --enforce`: uninstalls any device-installed, non-plumbing package
+# `apply --enforce`: uninstalls any device-installed, non-plumbing package
 # with no matching `pkg:` entry in the config (see list_extra_pkgs). Prompts
 # once for the whole batch on a given device, not once per package -- skip
 # the prompt with -y/--yes/--noconfirm/--no-confirm. Respects --dry-run:
@@ -2139,11 +2183,14 @@ cmd_uninstall() {
     fi
   done
 
+  maybe_run_adb_stop_cmd "$config" "$DRY_RUN"
+
   return "$overall_rc"
 }
 
 cmd_clear_cache() {
   local assume_yes=""
+  local DRY_RUN=""
   local -a pkgs=()
 
   while [[ -n "${1:-}" ]]
@@ -2969,6 +3016,7 @@ cmd_diff() {
   local bulk=""
   local sort_by="name"
   local full=""
+  local DRY_RUN=""
 
   while [[ -n "${1:-}" ]]
   do
@@ -2995,6 +3043,13 @@ cmd_diff() {
         ;;
       --full)
         full=1
+        shift
+        ;;
+      -k|--dry-run|--dryrun)
+        # This command itself is already read-only (nothing to preview),
+        # but still tracked so maybe_run_adb_stop_cmd at the end can
+        # respect it (see its comment).
+        DRY_RUN=1
         shift
         ;;
       *)
@@ -3076,8 +3131,10 @@ cmd_diff() {
           done
         fi
       } | sort -t $'\t' -k"${sort_field},${sort_field}" -f
-    } | render_table | colorize_word installed "$C_GREEN" | colorize_word missing "$C_YELLOW" | colorize_word extra "$C_RED"
+    } | render_table | colorize_word installed "$C_GREEN" | colorize_word missing "$C_YELLOW" | colorize_word extra "$C_RED" | colorize_word disabled "$C_CYAN" | colorize_word unwanted "$C_RED" | colorize_word removed "$C_GREEN"
   done
+
+  maybe_run_adb_stop_cmd "$config" "$DRY_RUN"
 }
 
 # Read-only, same shape as cmd_diff but for root modules (APatch APModules
@@ -3095,6 +3152,7 @@ cmd_modules() {
   local cli_framework=""
   local bulk=""
   local full=""
+  local DRY_RUN=""
 
   while [[ -n "${1:-}" ]]
   do
@@ -3121,6 +3179,13 @@ cmd_modules() {
         ;;
       --full)
         full=1
+        shift
+        ;;
+      -k|--dry-run|--dryrun)
+        # This command itself is already read-only (nothing to preview),
+        # but still tracked so maybe_run_adb_stop_cmd at the end can
+        # respect it (see its comment).
+        DRY_RUN=1
         shift
         ;;
       *)
@@ -3215,6 +3280,8 @@ cmd_modules() {
       } | sort -t $'\t' -k1,1 -f
     } | render_table | colorize_word installed "$C_GREEN" | colorize_word missing "$C_YELLOW" | colorize_word extra "$C_RED"
   done
+
+  maybe_run_adb_stop_cmd "$config" "$DRY_RUN"
 }
 
 # `pm list packages -i` reports the installer attribution package, which is
