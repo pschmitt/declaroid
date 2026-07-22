@@ -239,6 +239,50 @@ In order:
 2. `$DECLAROID_CONFIG`
 3. `${XDG_CONFIG_HOME:-$HOME/.config}/declaroid/apps.yaml`
 
+### `imports:` -- sharing apps/modules across config files
+
+Running one config per device is natural, but the `apps:`/`modules:` lists
+tend to repeat a lot between them. `imports:` pulls in other config file(s)
+to cut down on that:
+
+```yaml
+# px5.yaml
+device: redfin
+store: gplay
+imports:
+  - common-apps.yaml
+  - common-modules.yaml
+
+apps:
+  - name: Camera
+    pkg: com.google.android.GoogleCamera
+```
+
+```yaml
+# common-apps.yaml -- just a fragment, no device:/store:/etc of its own
+apps:
+  - name: WhatsApp Messenger
+    pkg: com.whatsapp
+```
+
+Paths are relative to the file that references them. Each import's
+`apps:`/`modules:`/`profiles:` entries are merged in first (in listed
+order), then the file's own -- pure concatenation, not an override or a
+dedup by pkg/id, so listing the same app in both a shared file and the
+device file gives you two rows, not one. An import can itself have its
+own `imports:` (resolved recursively), and a cycle is detected and
+rejected rather than hanging. Every other top-level key (`device:`,
+`store:`, `enforce:`, `adb:`, `root:`, `profile:`) only ever comes from
+the file you actually pointed `--config`/`-c` at -- a shared fragment is
+just a library of apps/modules, not a device template of its own.
+
+This only applies to `apply`/`uninstall`/`diff`/`modules` -- `add` and
+`download` always read (and `add` writes) the file you point them at
+exactly as it is on disk, with no merging. Concretely: `add`'s
+already-in-config duplicate check only looks at that one file's own
+`apps:`, not anything pulled in via `imports:` -- a known limitation, not
+an oversight.
+
 ### Device matching
 
 Declaroid resolves a target device in this order: `--device`,

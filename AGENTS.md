@@ -402,6 +402,67 @@ incomplete change, not a follow-up.
   is ("don't fail a download if adb is not installed" per its own
   comment). This is what makes `download` genuinely device-independent,
   same positioning as `search` ("no device or config needed").
+- **`imports:` (config file A pulling in apps:/modules:/profiles: from
+  file B) is resolved by declaroid itself, not yq/YAML** -- `yq --help`
+  confirms there's no `!include`-style tag support at all, only
+  `load(file)` inside an expression and `eval-all` for multi-file
+  merging. `collect_imports` (recursive, cycle-guarded by realpath via a
+  `SEEN` associative array) and `resolve_config` (the actual merge) are
+  the one place this happens; every `cmd_apply`/`cmd_uninstall`/
+  `cmd_diff`/`cmd_modules` reassigns its own local `config` to
+  `resolve_config`'s output right after its existing config-file-exists
+  check, so every other `yq`/`app_rows`/`module_rows`/`list_extra_pkgs`/
+  etc call site downstream keeps treating `$config` as an opaque path --
+  no changes needed anywhere else. `add`/`download` deliberately don't
+  call this at all: `add` writes into the real file directly (a merged
+  temp copy would just be discarded after the run), so its duplicate-pkg
+  check only ever sees that one file's own `apps:`, not anything pulled
+  in via `imports:` -- documented as a known limitation, not fixed, since
+  fixing it would mean either resolving twice (once merged for the check,
+  once raw for the write) or threading a second config value through
+  `cmd_add`/`add_app_to_config`, and it hasn't been worth it yet.
+- **`yq eval-all '[(.$key // [])[]]' file1 file2 ...' -- confirmed as the
+  working idiom for "concatenate this one array key across N files, in
+  file order."** Verified empirically (a 3-file test, `.apps` from each,
+  correct order, and a 4th file entirely missing the key contributing
+  nothing rather than erroring). `resolve_config` writes each merged
+  array to its own temp file and pulls it back into the resolved copy via
+  `load(strenv(...))` (env-var-scoped, same convention as
+  `add_app_to_config`'s `DECLAROID_NAME`/`DECLAROID_PKG`) rather than
+  inlining a potentially large array as a literal expression.
+- **A `trap ... EXIT` (or `RETURN`) referencing a `local` variable in
+  single-quoted form is broken, and this was caught the hard way, not
+  reasoned out in advance.** `resolve_config`'s resolved-path temp file
+  needed cleanup that survives every early `return` in
+  `cmd_apply`/etc, so the first attempt was `trap 'rm -f
+  "$resolved_config"' RETURN` -- single-quoted, deferring `$resolved_config`
+  expansion until the trap actually *fires*. This is wrong on two
+  separate counts, both confirmed against the real script, not a
+  simulation: (1) a `RETURN` trap set inside a function is **not**
+  scoped to that function's own return -- it re-fires on every
+  subsequent function return up the call stack (including `main()`'s),
+  because bash's trap table is a single global, not saved/restored per
+  call frame; swapping to `EXIT` fixes that specific symptom (only one
+  process exit, ever, since each invocation runs exactly one `cmd_*`
+  before the process ends). But (2) by the time *any* trap actually
+  fires -- `RETURN` or `EXIT` alike -- the function that declared
+  `resolved_config` as `local` has already returned and unwound, so that
+  variable no longer exists in *any* live scope; a single-quoted
+  deferred-reference trap command hits `set -u`'s "unbound variable" at
+  that point, confirmed with both `RETURN` (fired early, mid-command,
+  from an unrelated frame) and `EXIT` (fired once, cleanly, but still
+  hit the same unbound-variable error). **The fix is `trap "rm -f
+  '$resolved_config'" EXIT`** -- double-quoted, so `$resolved_config`
+  expands immediately, at the moment `trap` itself runs, baking the
+  literal path into the registered command as a plain string with no
+  variable reference left to re-evaluate later. Confirmed with a minimal
+  two-line repro (`local f=...; touch "$f"; trap "rm -f \"$f\"" EXIT`)
+  before reapplying to the real script. `shellcheck`'s SC2064 (which
+  recommends single-quoting `trap` arguments) is *wrong for this specific
+  case* -- its default advice assumes you want deferred evaluation (the
+  common signal-handler idiom, e.g. `trap 'log $LINENO' ERR`), which is
+  exactly the bug here; disabled with a comment explaining why, not
+  fixed by following the warning.
 
 ## Root modules (APatch/Magisk)
 

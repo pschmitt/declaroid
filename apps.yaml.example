@@ -1,6 +1,17 @@
 # Copy this file to ~/.config/declaroid/apps.yaml (or point --config /
 # $DECLAROID_CONFIG at your own copy) and adjust it to your needs.
 
+# Optional. Pulls in apps:/modules:/profiles: from other config file(s) --
+# paths relative to this file -- so shared apps/modules don't have to be
+# repeated across a config-per-device setup. Merged as: each import's
+# entries first (in listed order, recursively), then this file's own --
+# plain concatenation, no override/dedup by pkg/id. Only applies to
+# apply/uninstall/diff/modules; add/download always read (and add writes)
+# this exact file, ignoring imports:. See README.md for the full writeup.
+# imports:
+#   - common-apps.yaml
+#   - common-modules.yaml
+
 # Optional. Matched as a case-insensitive substring against each connected
 # device's serial, USB path, product, model, and codename. Can be overridden
 # with --device or $TARGET_DEVICE. Omit entirely to be prompted interactively

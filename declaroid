@@ -170,6 +170,16 @@ device via the config); best-effort, a failing stop_cmd only logs, it
 never fails the command itself.
 
 ${C_BOLD}Config schema:${C_RESET}
+  imports:                                    # optional; other config file(s) to pull apps:/
+                                               # modules:/profiles: from, paths relative to this
+                                               # file. Merged in as: every import's entries
+                                               # first (in listed order, recursively -- an
+                                               # import may itself have imports:), then this
+                                               # file's own -- pure concatenation, no override/
+                                               # dedup by pkg/id. Applies to apply/uninstall/
+                                               # diff/modules only -- add/download always read
+                                               # and write the file as-is, ignoring imports:.
+    - <path, e.g. common-apps.yaml>
   device: <adb serial or substring query>   # optional, see device resolution above
   store: gplay|fdroid|izzyondroid|github|local|url  # optional top-level default, defaults to gplay
   profile: <name>|<user id>|all|current       # optional top-level default (apply only)
@@ -1629,6 +1639,118 @@ uninstall_app() {
   fi
 }
 
+# Recursively resolves $config's `imports:` list (paths relative to
+# $config's own directory) into IMPORT_FILES -- a flat, ordered list of
+# fragment file paths, deepest/earliest dependencies first -- by
+# appending to the caller-declared `local -a IMPORT_FILES=()` (same
+# dynamic-scope accumulator convention as PLAN_PENDING/REMOVAL_PLAN_PENDING
+# elsewhere in this file). This has to be an accumulator, not a "print
+# rows, mapfile the output" function like the rest of this file's helpers
+# -- capturing a *recursive* self-call via `< <(...)`/`$(...)` would fork
+# a subshell per call, and SEEN (also caller-declared, `local -A SEEN=()`)
+# needs to survive across the whole recursion to catch a cycle at all.
+# Recurses into each import's own `imports:` too, so a shared fragment can
+# itself pull in another (a legitimate diamond -- two configs importing
+# the same common fragment -- must still work, so this guards by realpath
+# rather than a fixed depth cap).
+collect_imports() {
+  local config="$1"
+
+  local real
+  real="$(realpath "$config")"
+
+  if [[ -n "${SEEN[$real]:-}" ]]
+  then
+    log_error "Cycle detected in imports: at $config"
+    return 1
+  fi
+  SEEN["$real"]=1
+
+  local dir
+  dir="$(dirname "$config")"
+
+  local -a raw_imports
+  mapfile -t raw_imports < <(yq -r '(.imports // [])[]' "$config")
+
+  local imp resolved_imp
+  for imp in "${raw_imports[@]}"
+  do
+    [[ -z "$imp" ]] && continue
+
+    if [[ "$imp" == /* ]]
+    then
+      resolved_imp="$imp"
+    else
+      resolved_imp="$dir/$imp"
+    fi
+
+    if [[ ! -f "$resolved_imp" ]]
+    then
+      log_error "imports: entry not found: $resolved_imp (from $config)"
+      return 1
+    fi
+
+    collect_imports "$resolved_imp" || return 1
+    IMPORT_FILES+=("$resolved_imp")
+  done
+}
+
+# If $config has no `imports:` at all (the common case), prints $config
+# unchanged -- no copy, no temp file. Otherwise merges apps:/modules:/
+# profiles: from every resolved import (collect_imports, in dependency
+# order) plus $config's own entries (last -- imports contribute first, so
+# a device-specific file's own list conceptually reads as "on top of the
+# shared ones", though this is pure concatenation, not an override/dedup
+# by pkg/id) into a throwaway temp copy, and prints *that* path instead.
+# Every other top-level key (device/store/enforce/adb/root/profile) is
+# copied verbatim from $config, untouched -- imports only ever contribute
+# to those three list-type sections. Every caller (cmd_apply/cmd_uninstall/
+# cmd_diff/cmd_modules) reassigns its own local `config` to this function's
+# output right after its own config-file-exists check, so every existing
+# `yq`/app_rows/module_rows/list_extra_pkgs/etc call site downstream keeps
+# treating `$config` as an opaque path -- no other change needed anywhere
+# else in the script. `add`/`download` deliberately do NOT call this: `add`
+# writes into the real, original file (a merged temp copy would be
+# discarded after the run), so its own duplicate-pkg check only ever sees
+# that file's own `apps:`, not anything pulled in via `imports:` -- a
+# known, documented limitation, not an oversight.
+resolve_config() {
+  local config="$1"
+
+  local -A SEEN=()
+  local -a IMPORT_FILES=()
+  collect_imports "$config" || return 1
+
+  if [[ ${#IMPORT_FILES[@]} -eq 0 ]]
+  then
+    printf '%s\n' "$config"
+    return 0
+  fi
+
+  local resolved
+  resolved="$(mktemp --suffix=.yaml)"
+  cp "$config" "$resolved"
+
+  # `yq eval-all '[(.$key // [])[]]' file1 file2 ...` is the confirmed-
+  # working idiom for "concatenate this array key across every listed
+  # file, in file order" -- yq has no `!include`-style tag support at all
+  # (checked `yq --help`), so this is declaroid's own preprocessing, not a
+  # yq/YAML-native feature. The merged array is written to its own temp
+  # file and pulled back in via `load(strenv(...))` (env-var-scoped,
+  # same convention as add_app_to_config's DECLAROID_NAME/DECLAROID_PKG)
+  # rather than trying to inline a large array as a literal expression.
+  local key merged_file
+  for key in apps modules profiles
+  do
+    merged_file="$(mktemp --suffix=.yaml)"
+    yq eval-all "[(.$key // [])[]]" "${IMPORT_FILES[@]}" "$config" > "$merged_file"
+    DECLAROID_MERGED_FILE="$merged_file" yq -i ".$key = load(strenv(DECLAROID_MERGED_FILE))" "$resolved"
+    rm -f "$merged_file"
+  done
+
+  printf '%s\n' "$resolved"
+}
+
 # Emits the configured apps as one row per app: name, pkg, store (defaulted),
 # repo, asset (defaulted), path, profile (defaulted), url, state.installed
 # (defaulted "true"), state.disabled (defaulted "false") -- joined with
@@ -1873,6 +1995,23 @@ cmd_apply() {
     log_error "Config file not found: $config"
     return 2
   fi
+
+  local resolved_config
+  if ! resolved_config="$(resolve_config "$config")"
+  then
+    return 2
+  fi
+  # Immediate expansion is intentional here, not the mistake SC2064
+  # usually flags: $resolved_config is a `local` that won't exist in any
+  # active scope by the time an EXIT trap actually fires (confirmed
+  # empirically -- a single-quoted, truly deferred version threw
+  # "resolved_config: unbound variable" under this script's set -u,
+  # since traps evaluate in whatever scope is active when they fire, not
+  # the scope `trap` was called from). Baking the resolved path in as a
+  # literal string now is the whole point.
+  # shellcheck disable=SC2064
+  [[ "$resolved_config" != "$config" ]] && trap "rm -f '$resolved_config'" EXIT
+  config="$resolved_config"
 
   # `enforce: true` in the config is equivalent to always passing
   # --enforce -- an explicit `== true` comparison, not `//`, since the
@@ -2211,6 +2350,23 @@ cmd_uninstall() {
     log_error "Config file not found: $config"
     return 2
   fi
+
+  local resolved_config
+  if ! resolved_config="$(resolve_config "$config")"
+  then
+    return 2
+  fi
+  # Immediate expansion is intentional here, not the mistake SC2064
+  # usually flags: $resolved_config is a `local` that won't exist in any
+  # active scope by the time an EXIT trap actually fires (confirmed
+  # empirically -- a single-quoted, truly deferred version threw
+  # "resolved_config: unbound variable" under this script's set -u,
+  # since traps evaluate in whatever scope is active when they fire, not
+  # the scope `trap` was called from). Baking the resolved path in as a
+  # literal string now is the whole point.
+  # shellcheck disable=SC2064
+  [[ "$resolved_config" != "$config" ]] && trap "rm -f '$resolved_config'" EXIT
+  config="$resolved_config"
 
   local devices_raw
   if ! devices_raw="$(resolve_devices "$cli_device" "$config" "$bulk")"
@@ -3351,6 +3507,23 @@ cmd_diff() {
     return 2
   fi
 
+  local resolved_config
+  if ! resolved_config="$(resolve_config "$config")"
+  then
+    return 2
+  fi
+  # Immediate expansion is intentional here, not the mistake SC2064
+  # usually flags: $resolved_config is a `local` that won't exist in any
+  # active scope by the time an EXIT trap actually fires (confirmed
+  # empirically -- a single-quoted, truly deferred version threw
+  # "resolved_config: unbound variable" under this script's set -u,
+  # since traps evaluate in whatever scope is active when they fire, not
+  # the scope `trap` was called from). Baking the resolved path in as a
+  # literal string now is the whole point.
+  # shellcheck disable=SC2064
+  [[ "$resolved_config" != "$config" ]] && trap "rm -f '$resolved_config'" EXIT
+  config="$resolved_config"
+
   local devices_raw
   if ! devices_raw="$(resolve_devices "$cli_device" "$config" "$bulk")"
   then
@@ -3485,6 +3658,23 @@ cmd_modules() {
     log_error "Config file not found: $config"
     return 2
   fi
+
+  local resolved_config
+  if ! resolved_config="$(resolve_config "$config")"
+  then
+    return 2
+  fi
+  # Immediate expansion is intentional here, not the mistake SC2064
+  # usually flags: $resolved_config is a `local` that won't exist in any
+  # active scope by the time an EXIT trap actually fires (confirmed
+  # empirically -- a single-quoted, truly deferred version threw
+  # "resolved_config: unbound variable" under this script's set -u,
+  # since traps evaluate in whatever scope is active when they fire, not
+  # the scope `trap` was called from). Baking the resolved path in as a
+  # literal string now is the whole point.
+  # shellcheck disable=SC2064
+  [[ "$resolved_config" != "$config" ]] && trap "rm -f '$resolved_config'" EXIT
+  config="$resolved_config"
 
   local devices_raw
   if ! devices_raw="$(resolve_devices "$cli_device" "$config" "$bulk")"
