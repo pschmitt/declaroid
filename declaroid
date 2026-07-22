@@ -3996,12 +3996,23 @@ known_pkg_override() {
     org.fdroid.fdroid)
       printf 'url%shttps://f-droid.org/F-Droid.apk%s%s\n' "$ROW_SEP" "$ROW_SEP" "$ROW_SEP"
       ;;
-    dev.imranr.obtainium.fdroid | dev.imranr.obtainium)
-      # jq/yq test() matches this as a substring of the filename, not
-      # required to match the whole thing, so this can't accidentally
-      # match e.g. app-arm64-v8a-release.apk -- verified against a real
-      # release (github.com/ImranR98/Obtainium, tag v1.6.10): matches
-      # exactly app-release.apk, nothing else, out of ~30 assets.
+    dev.imranr.obtainium.fdroid)
+      # Each release ships both an app-release.apk (real package name
+      # dev.imranr.obtainium, no .fdroid suffix) and an app-fdroid-
+      # release.apk (real package name dev.imranr.obtainium.fdroid) --
+      # confirmed via `aapt2 dump badging` against a real release
+      # (v1.6.10). A single case arm covering both pkg ids with the same
+      # app-release.apk asset (the previous version of this) was a real
+      # bug: installing that asset for this pkg id installs the *other*
+      # package instead, which `--enforce` then immediately uninstalls
+      # again on the very same run since it doesn't match what's
+      # configured -- caught by a real emulator e2e run, not just
+      # interactive testing. jq/yq test() matches as a substring, not
+      # required to match the whole filename, so this can't accidentally
+      # match e.g. app-arm64-v8a-fdroid-release.apk.
+      printf 'github%s%sImranR98/Obtainium%sapp-fdroid-release\\.apk$\n' "$ROW_SEP" "$ROW_SEP" "$ROW_SEP"
+      ;;
+    dev.imranr.obtainium)
       printf 'github%s%sImranR98/Obtainium%sapp-release\\.apk$\n' "$ROW_SEP" "$ROW_SEP" "$ROW_SEP"
       ;;
     com.topjohnwu.magisk)

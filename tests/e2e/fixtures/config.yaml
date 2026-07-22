@@ -2,10 +2,16 @@ enforce: true
 
 apps:
   - name: Obtainium
+    # app-release.apk's real package name is dev.imranr.obtainium (no
+    # .fdroid suffix) -- app-fdroid-release.apk is the one that's actually
+    # dev.imranr.obtainium.fdroid. Getting this wrong installed the wrong
+    # pkg, which enforce: true then immediately uninstalled again on the
+    # same run since it didn't match what's configured here -- a real bug
+    # this e2e run caught, now also fixed in known_pkg_override.
     pkg: dev.imranr.obtainium.fdroid
     store: github
     repo: ImranR98/Obtainium
-    asset: 'app-release\.apk$'
+    asset: 'app-fdroid-release\.apk$'
 
 obtainium:
   - pkg: org.breezyweather
