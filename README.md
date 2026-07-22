@@ -268,11 +268,16 @@ apps:
 
 Paths are relative to the file that references them. Each import's
 `apps:`/`modules:`/`profiles:`/`obtainium:` entries are merged in first (in
-listed order), then the file's own -- pure concatenation, not an override or
-a dedup by pkg/id, so listing the same app in both a shared file and the
-device file gives you two rows, not one. An import can itself have its
-own `imports:` (resolved recursively), and a cycle is detected and
-rejected rather than hanging.
+listed order), then the file's own. `modules:`/`profiles:`/`obtainium:` are
+pure concatenation -- listing the same module/profile/obtainium repo in both
+a shared file and the device file gives you two rows, not one. `apps:` is
+the one exception: entries are deduped by `pkg`, last occurrence wins
+outright (replacing every earlier one, not just adding alongside it) -- so a
+device's own `apps:` entry for a `pkg` it also gets from an import (e.g. its
+own `state: {installed: false}`) actually overrides the imported one,
+instead of producing two contradictory rows for the same app. An import can
+itself have its own `imports:` (resolved recursively), and a cycle is
+detected and rejected rather than hanging.
 
 `enforce:`/`grant_permissions:`/`store:` cascade in differently -- as a
 scalar override, not a concatenation: the importing file's own value wins
@@ -307,6 +312,43 @@ exactly as it is on disk, with no merging. Concretely: `add`'s
 already-in-config duplicate check only looks at that one file's own
 `apps:`, not anything pulled in via `imports:` -- a known limitation, not
 an oversight.
+
+### `configs:` -- applying several device configs in one invocation
+
+`imports:` merges shared fragments *into* one device's config. `configs:`
+is the opposite kind of composition: a *meta-config* that lists other
+complete, independent device configs to run, one after another, in a
+single `apply`/`uninstall`/`diff`/`modules` invocation -- each one resolving
+its own `device:`, `apps:`, `imports:`, `root:`, everything, exactly as if
+you'd pointed `--config` at it directly:
+
+```yaml
+# all.yaml
+configs:
+  - px5.yaml
+  - zf10.yaml
+  - mp4.yaml
+```
+
+```console
+$ declaroid apply -c all.yaml
+```
+
+Every other CLI flag you pass (`-y`, `--enforce`, `-v`, `-d`, ...) is
+forwarded to every listed config unchanged -- `-c`/`--config` itself is the
+only one that's per-leaf. A config with `configs:` must not also set
+`apps:`/`device:` of its own -- it's purely a fan-out list, never merged
+with anything, so mixing the two is rejected as a config error rather than
+silently picking one. Paths are relative to the file that references them,
+same as `imports:`; a listed config may itself be another meta-config
+(resolved recursively), and a cycle is detected and rejected the same way
+`imports:` cycles are.
+
+One listed config failing (a device that's not connected, a download that
+errors out, ...) does not stop the rest from running -- every leaf always
+runs, and the command's own exit status reflects whether *any* of them
+failed, mirroring how `--bulk` already keeps going across multiple matched
+devices within a single config rather than aborting on the first one.
 
 ### Device matching
 

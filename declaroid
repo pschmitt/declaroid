@@ -192,13 +192,34 @@ device via the config); best-effort, a failing stop_cmd only logs, it
 never fails the command itself.
 
 ${C_BOLD}Config schema:${C_RESET}
+  configs:                                    # optional; other complete, independent config
+                                               # file(s) to run (apply/uninstall/diff/modules
+                                               # only), one after another in listed order, each
+                                               # resolving its own device:/apps:/imports:/root:/
+                                               # everything exactly as if run directly with -c
+                                               # <that file> -- never merged, unlike imports:
+                                               # below. A config setting configs: must not also
+                                               # set apps:/device: itself. Paths relative to this
+                                               # file; a listed config may itself set configs:
+                                               # (resolved recursively), cycle-detected like
+                                               # imports:. Every other CLI flag (-y/--enforce/-v/
+                                               # -d/...) is forwarded to every listed config as
+                                               # given, only -c/--config itself is swapped per
+                                               # file. One listed config failing doesn't stop the
+                                               # rest -- the exit status reflects whether any of
+                                               # them failed.
+    - <path, e.g. px5.yaml>
   imports:                                    # optional; other config file(s) to pull apps:/
                                                # modules:/profiles:/obtainium: from, paths
                                                # relative to this file. Merged in as: every
                                                # import's entries first (in listed order,
                                                # recursively -- an import may itself have
-                                               # imports:), then this file's own -- pure
-                                               # concatenation, no override/dedup by pkg/id.
+                                               # imports:), then this file's own. modules:/
+                                               # profiles:/obtainium: are pure concatenation;
+                                               # apps: is the exception -- entries dedup by pkg,
+                                               # last occurrence wins outright (lets a device's
+                                               # own apps: entry override one pulled in from an
+                                               # import, e.g. its own state: {installed: false}).
                                                # enforce:/grant_permissions:/store:/
                                                # obtainium_auto_track: cascade in
                                                # from imports differently (override, not
@@ -1913,6 +1934,151 @@ resolve_config() {
   printf '%s\n' "$resolved"
 }
 
+# Recursively expands a *meta-config*'s `configs:` list (paths relative to
+# the meta-config's own directory, same convention as imports:) into real,
+# on-disk leaf config paths -- printed one per line, in listed order,
+# depth-first. A meta-config may itself list other meta-configs; cycle
+# detection uses the same realpath-keyed SEEN-map idiom as collect_imports,
+# but a separate map (META_SEEN, populated by the caller) since the two
+# mechanisms are otherwise independent -- a config could in principle be
+# reachable through both imports: and configs: without that being an actual
+# cycle in either sense on its own. Unlike collect_imports (which returns
+# nothing itself, only populates IMPORT_FILES, since resolve_config always
+# merges the original $config in too), this prints $config *itself* when it
+# has no configs: of its own -- that's the leaf case, and it's the only
+# case that should ever actually run apply/uninstall/diff/modules' real
+# single-config pipeline.
+collect_meta_configs() {
+  local config="$1"
+
+  local real
+  real="$(realpath "$config")"
+
+  if [[ -n "${META_SEEN[$real]:-}" ]]
+  then
+    log_error "Cycle detected in configs: at $config"
+    return 1
+  fi
+  META_SEEN["$real"]=1
+
+  local -a raw_configs
+  mapfile -t raw_configs < <(yq -r '(.configs // [])[]' "$config")
+
+  if [[ ${#raw_configs[@]} -eq 0 ]]
+  then
+    printf '%s\n' "$config"
+    return 0
+  fi
+
+  local dir
+  dir="$(dirname "$config")"
+
+  local c resolved_c
+  for c in "${raw_configs[@]}"
+  do
+    [[ -z "$c" ]] && continue
+
+    if [[ "$c" == /* ]]
+    then
+      resolved_c="$c"
+    else
+      resolved_c="$dir/$c"
+    fi
+
+    if [[ ! -f "$resolved_c" ]]
+    then
+      log_error "configs: entry not found: $resolved_c (from $config)"
+      return 1
+    fi
+
+    collect_meta_configs "$resolved_c" || return 1
+  done
+}
+
+# True (rc 0) if $config's own top-level `configs:` is a non-empty list --
+# the signal that it's a *meta-config* (a fan-out list of other config
+# files, see collect_meta_configs) rather than a normal single-device
+# config. Checked directly against the raw, as-given file, before
+# resolve_config/imports: even enter the picture -- the two mechanisms are
+# unrelated (configs: fans one invocation out over several independent
+# configs; imports: merges apps:/modules:/etc into one).
+is_meta_config() {
+  local config="$1"
+  local n
+  n="$(yq -r '(.configs // []) | length' "$config" 2>/dev/null || printf '0')"
+  [[ "$n" -gt 0 ]]
+}
+
+# Filters -c/--config VALUE pairs out of an argv (passed as "$@"), printing
+# what's left one arg per line -- used by run_meta_config to forward every
+# *other* original CLI flag (e.g. -y, --enforce, -v) down to each leaf
+# config's own cmd_apply/cmd_uninstall/cmd_diff/cmd_modules call, while
+# swapping in that leaf's own -c itself. Every other flag in this file
+# takes a value as the very next arg (never `--flag=value`), so a plain
+# "shift 2"-equivalent skip is enough here too.
+strip_config_flag() {
+  while [[ $# -gt 0 ]]
+  do
+    case "$1" in
+      -c|--config)
+        shift 2
+        ;;
+      *)
+        printf '%s\n' "$1"
+        shift
+        ;;
+    esac
+  done
+}
+
+# Runs $fn (cmd_apply/cmd_uninstall/cmd_diff/cmd_modules) once per leaf
+# config listed (possibly transitively, via nested configs:) in $config's
+# own `configs:` -- called only after the caller has already confirmed
+# is_meta_config "$config" is true. Every other original CLI arg
+# ("${orig_args[@]}", $config's own -c/--config stripped out) is forwarded
+# unchanged to every leaf call; each leaf resolves its own device/apps/
+# root/etc completely independently, exactly as if it had been passed to
+# declaroid directly with -c <leaf> -- this never merges configs the way
+# imports: does, it only fans a single invocation out. Runs every leaf
+# regardless of an earlier one's exit status (a bad device/download on one
+# device shouldn't block the rest), rolling up a nonzero return if any leaf
+# failed -- the same "keep going, aggregate at the end" convention already
+# used for --bulk's multiple matched devices within a single config.
+run_meta_config() {
+  local fn="$1"
+  local config="$2"
+  shift 2
+  local -a orig_args=("$@")
+
+  local has_apps has_device
+  has_apps="$(yq -r '(.apps // []) | length > 0' "$config")"
+  has_device="$(yq -r '.device != null' "$config")"
+  if [[ "$has_apps" == true || "$has_device" == true ]]
+  then
+    log_error "$config: configs: cannot be combined with apps:/device: in the same file"
+    return 2
+  fi
+
+  local -A META_SEEN=()
+  local -a leaf_configs
+  mapfile -t leaf_configs < <(collect_meta_configs "$config") || return 2
+
+  local -a filtered_args
+  mapfile -t filtered_args < <(strip_config_flag "${orig_args[@]}")
+
+  local leaf overall_rc=0
+  for leaf in "${leaf_configs[@]}"
+  do
+    log_step "=== Config: $leaf ==="
+    if ! "$fn" -c "$leaf" "${filtered_args[@]}"
+    then
+      overall_rc=1
+    fi
+  done
+
+  return "$overall_rc"
+}
+
 # Emits the configured apps as one row per app: name, pkg, store (defaulted),
 # repo, asset (defaulted), path, profile (defaulted), url, state.installed
 # (defaulted "true"), state.disabled (defaulted "false") -- joined with
@@ -2075,6 +2241,7 @@ print_install_plan() {
 }
 
 cmd_apply() {
+  local -a orig_args=("$@")
   local config="$DEFAULT_CONFIG"
   local cli_device=""
   local DRY_RUN=""
@@ -2161,6 +2328,12 @@ cmd_apply() {
   then
     log_error "Config file not found: $config"
     return 2
+  fi
+
+  if is_meta_config "$config"
+  then
+    run_meta_config cmd_apply "$config" "${orig_args[@]}"
+    return $?
   fi
 
   local resolved_config
@@ -2499,6 +2672,7 @@ enforce_config() {
 }
 
 cmd_uninstall() {
+  local -a orig_args=("$@")
   local config="$DEFAULT_CONFIG"
   local cli_device=""
   local DRY_RUN=""
@@ -2546,6 +2720,12 @@ cmd_uninstall() {
   then
     log_error "Config file not found: $config"
     return 2
+  fi
+
+  if is_meta_config "$config"
+  then
+    run_meta_config cmd_uninstall "$config" "${orig_args[@]}"
+    return $?
   fi
 
   local resolved_config
@@ -3645,6 +3825,7 @@ list_extra_pkgs() {
 }
 
 cmd_diff() {
+  local -a orig_args=("$@")
   local config="$DEFAULT_CONFIG"
   local cli_device=""
   local bulk=""
@@ -3710,6 +3891,12 @@ cmd_diff() {
   then
     log_error "Config file not found: $config"
     return 2
+  fi
+
+  if is_meta_config "$config"
+  then
+    run_meta_config cmd_diff "$config" "${orig_args[@]}"
+    return $?
   fi
 
   local resolved_config
@@ -3798,6 +3985,7 @@ cmd_diff() {
 # own `module install` has a documented CLI-only failure mode the GUI
 # doesn't hit, neither of which this codebase has a good answer for yet).
 cmd_modules() {
+  local -a orig_args=("$@")
   local config="$DEFAULT_CONFIG"
   local cli_device=""
   local cli_framework=""
@@ -3862,6 +4050,12 @@ cmd_modules() {
   then
     log_error "Config file not found: $config"
     return 2
+  fi
+
+  if is_meta_config "$config"
+  then
+    run_meta_config cmd_modules "$config" "${orig_args[@]}"
+    return $?
   fi
 
   local resolved_config

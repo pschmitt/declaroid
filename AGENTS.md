@@ -500,6 +500,40 @@ incomplete change, not a follow-up.
   `load(strenv(...))` (env-var-scoped, same convention as
   `add_app_to_config`'s `DECLAROID_NAME`/`DECLAROID_PKG`) rather than
   inlining a potentially large array as a literal expression.
+- **`configs:` (a meta-config fanning one invocation out over several
+  independent device configs) is deliberately a separate mechanism from
+  `imports:`, not an extension of it** -- `imports:` merges fragments *into*
+  one resolved config (`resolve_config`, apps: dedup-by-pkg and all);
+  `configs:` never merges anything, it just runs `cmd_apply`/
+  `cmd_uninstall`/`cmd_diff`/`cmd_modules` once per listed leaf, each
+  through the *normal*, unmodified single-config pipeline (own
+  `resolve_config`, own `resolve_devices`, own everything). Detected via
+  `is_meta_config` against the *raw* `$config`, before `resolve_config` is
+  ever called on it -- checking post-merge would be meaningless since a
+  meta-config has no `apps:`/`device:` of its own to resolve in the first
+  place. `collect_meta_configs` mirrors `collect_imports`'s recursive,
+  realpath-keyed `SEEN`-map cycle guard almost exactly, but through its own
+  map (`META_SEEN`) -- confirmed, not assumed, that reusing the same `SEEN`
+  array as `imports:` would be wrong: `imports:` cycle-checks are scoped to
+  one `resolve_config` call's own import graph, while `configs:` fan-out
+  spans multiple independent `resolve_config` calls (one per leaf) that
+  must each start with a clean slate.
+  Each `cmd_*` captures `orig_args=("$@")` as its very first line (before
+  its own option-parsing loop consumes `$@` via `shift`), specifically so
+  `run_meta_config` can still forward the *original*, unconsumed argv to
+  every leaf -- `strip_config_flag` then removes just the `-c`/`--config`
+  pair from that copy before each leaf call swaps in its own `-c <leaf>`.
+  `run_meta_config` runs every leaf regardless of an earlier one's exit
+  status and rolls up a nonzero return if any failed, matching
+  `resolve_devices`/`--bulk`'s existing "keep going across multiple
+  matched devices, aggregate at the end" convention rather than aborting
+  the whole run on the first bad leaf (e.g. one device not currently
+  connected).
+  A meta-config combined with its own `apps:`/`device:` is rejected
+  outright (`run_meta_config`'s own guard) rather than picking one
+  behavior silently -- there's no non-surprising way to decide whether
+  such a file's `apps:` means anything once `configs:` is also fanning out
+  to other files that have their own.
 - **A `trap ... EXIT` (or `RETURN`) referencing a `local` variable in
   single-quoted form is broken, and this was caught the hard way, not
   reasoned out in advance.** `resolve_config`'s resolved-path temp file

@@ -1,0 +1,4 @@
+device: devB
+apps:
+  - name: B
+    pkg: com.example.b

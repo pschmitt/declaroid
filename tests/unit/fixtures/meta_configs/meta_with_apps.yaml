@@ -1,0 +1,5 @@
+configs:
+  - leaf_a.yaml
+apps:
+  - name: Whoops
+    pkg: com.example.whoops
