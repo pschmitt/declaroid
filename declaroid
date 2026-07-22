@@ -143,10 +143,36 @@ If it matches more than one connected device, declaroid errors out unless
 If nothing resolves at all, you'll be prompted to pick from connected
 devices (or, with --bulk, every connected device is used).
 
+If no device is connected at all, or none match, and the config sets
+${C_CYAN}adb.start_cmd${C_RESET}, that command is run once (via \`bash -c\`) and device
+resolution is retried exactly once more -- e.g. \`zhj adb::connect
+px5.lan\` to bring up a wireless-adb device that isn't currently
+connected. No further retries: if it still doesn't resolve, this fails the
+same way it would without a start_cmd configured at all.
+
+If ${C_CYAN}adb.auto_stop${C_RESET} is true, ${C_CYAN}adb.stop_cmd${C_RESET} is run (also via \`bash -c\`) once a
+command's real device work is done -- the teardown mirror of start_cmd,
+e.g. to disconnect wireless adb again afterward. Applies to apply,
+uninstall, diff, and modules (whichever command actually resolved a
+device via the config); best-effort, a failing stop_cmd only logs, it
+never fails the command itself.
+
 ${C_BOLD}Config schema:${C_RESET}
   device: <adb serial or substring query>   # optional, see device resolution above
   store: gplay|fdroid|izzyondroid|github|local|url  # optional top-level default, defaults to gplay
-  profile: <name>|<user id>|all|current       # optional top-level default (install only)
+  profile: <name>|<user id>|all|current       # optional top-level default (apply only)
+  adb:                                        # optional
+    start_cmd: <shell command>                 # optional; run (via \`bash -c\`) to bring up the
+                                                 # adb connection when device resolution fails,
+                                                 # see above
+    auto_stop: true|false                       # optional, default false; run stop_cmd once
+                                                 # a command's device work is done, see above
+    stop_cmd: <shell command>                   # optional; run (via \`bash -c\`) to tear the
+                                                 # adb connection back down, only if auto_stop
+                                                 # is true
+  enforce: true|false                         # optional, default false (apply only); equivalent
+                                               # to always passing --enforce. The CLI flag and
+                                               # this OR together.
   profiles:                                   # optional, gives profile: short aliases
     - name: <alias, e.g. work>
       id: <user id, e.g. 10>
@@ -416,8 +442,57 @@ resolve_devices() {
     fi
   fi
 
-  local -a lines
-  mapfile -t lines < <(list_device_lines)
+  local start_cmd=""
+  if [[ -n "$config" && -f "$config" ]]
+  then
+    start_cmd="$(yq -r '.adb.start_cmd // ""' "$config")"
+    [[ "$start_cmd" == "null" ]] && start_cmd=""
+  fi
+
+  # Tries discovery/matching as-is first; if that comes up empty and
+  # `adb.start_cmd` is configured, runs it (e.g. `zhj adb::connect
+  # px5.lan`) to bring the connection up and retries exactly once more --
+  # never loops beyond that, so a start_cmd that doesn't actually fix
+  # anything fails the same way it would without one, just after one extra
+  # attempt.
+  local -a lines matched=()
+  local attempt
+  for attempt in 1 2
+  do
+    mapfile -t lines < <(list_device_lines)
+    matched=()
+
+    if [[ ${#lines[@]} -gt 0 ]]
+    then
+      if [[ -n "$query" ]]
+      then
+        local line searchable
+        for line in "${lines[@]}"
+        do
+          searchable="$(build_searchable "$line")"
+          if [[ "${searchable,,}" == *"${query,,}"* ]]
+          then
+            matched+=("$line")
+          fi
+        done
+      else
+        matched=("${lines[@]}")
+      fi
+    fi
+
+    [[ ${#matched[@]} -gt 0 ]] && break
+    [[ "$attempt" -eq 2 || -z "$start_cmd" ]] && break
+
+    log_step "No matching adb device found, running adb.start_cmd"
+    # resolve_devices's own output is captured via $(...) by every caller
+    # (see AGENTS.md's "log to stderr, data to stdout" rule) -- start_cmd is
+    # an arbitrary, uncontrolled shell command that may print anything to
+    # stdout (confirmed with a real `zhj adb::connect` invocation, whose
+    # Tasker/HA call prints a stray JSON `[]` to stdout), so it must be
+    # redirected to stderr here or it silently corrupts the device list
+    # this function returns.
+    bash -c "$start_cmd" >&2
+  done
 
   if [[ ${#lines[@]} -eq 0 ]]
   then
@@ -425,27 +500,10 @@ resolve_devices() {
     return 1
   fi
 
-  local -a matched=()
-
-  if [[ -n "$query" ]]
+  if [[ -n "$query" && ${#matched[@]} -eq 0 ]]
   then
-    local line searchable
-    for line in "${lines[@]}"
-    do
-      searchable="$(build_searchable "$line")"
-      if [[ "${searchable,,}" == *"${query,,}"* ]]
-      then
-        matched+=("$line")
-      fi
-    done
-
-    if [[ ${#matched[@]} -eq 0 ]]
-    then
-      log_error "No connected device matches '$query'"
-      return 1
-    fi
-  else
-    matched=("${lines[@]}")
+    log_error "No connected device matches '$query'"
+    return 1
   fi
 
   if [[ ${#matched[@]} -eq 1 ]]

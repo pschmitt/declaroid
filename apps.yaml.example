@@ -11,12 +11,28 @@ device: redfin
 # One of: gplay (default), fdroid, github, local.
 store: gplay
 
-# Optional top-level default Android user/profile to install for (install
+# Optional top-level default Android user/profile to install for (apply
 # only). A user id (e.g. 0), or the literal "all" or "current". Omit this
 # entirely unless the device actually has more than one profile (a Work
 # Profile, Island, a second full user account) -- declaroid otherwise
 # auto-detects the device's current profile, which is what you want.
 # profile: 0
+
+# Optional. start_cmd runs once (if no device is connected at all, or none
+# match) to bring the adb connection up, then device resolution is retried
+# exactly once more. Useful for a wireless-adb device that isn't reliably
+# already connected. auto_stop/stop_cmd are the teardown mirror -- if
+# auto_stop is true, stop_cmd runs once a command's real device work is
+# done (apply/uninstall/diff/modules), e.g. to disconnect wireless adb
+# again afterward. auto_stop defaults to false.
+# adb:
+#   start_cmd: "zhj adb::connect px5.lan"
+#   auto_stop: true
+#   stop_cmd: "adb disconnect px5.lan:5555"
+
+# Optional, default false (apply only). Same as always passing --enforce:
+# also uninstalls any device app that isn't in this config at all.
+# enforce: true
 
 apps:
   - name: DB Navigator

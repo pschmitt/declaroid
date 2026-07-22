@@ -250,12 +250,44 @@ doesn't need to be an exact match.
 - **Exactly one match** → that device is used.
 - **Multiple matches** → declaroid errors out and lists what matched, unless
   `--bulk`/`--all-devices`/`--all` is given, in which case *every* matching
-  device is targeted (install/uninstall runs once per device).
+  device is targeted (apply/uninstall runs once per device).
 - **No query at all** (nothing set via flag, env, or config) and more than
   one device connected → you're prompted interactively to pick one, unless
   `--bulk` is given, in which case every connected device is targeted.
 - **No query and exactly one device connected** → that device is used, no
   prompt.
+
+If no device is connected at all, or none match, and the config sets
+`adb.start_cmd`, that command is run once (via `bash -c`) and device
+resolution is retried exactly once more:
+
+```yaml
+adb:
+  start_cmd: "zhj adb::connect px5.lan"
+```
+
+Useful for a wireless-adb device that isn't reliably already connected --
+`start_cmd` can be anything (`adb connect host:port`, a wrapper script, a
+Home Assistant/Tasker trigger to enable wireless adb first, ...). No further
+retries beyond the one: if it still doesn't resolve, this fails the same way
+it would without a `start_cmd` configured at all.
+
+The teardown mirror: set `adb.auto_stop: true` and `adb.stop_cmd` to run a
+command once a command's real device work is done, e.g. to disconnect
+wireless adb again afterward:
+
+```yaml
+adb:
+  start_cmd: "zhj adb::connect px5.lan"
+  auto_stop: true
+  stop_cmd: "adb disconnect px5.lan:5555"
+```
+
+Applies to `apply`, `uninstall`, `diff`, and `modules` -- whichever command
+actually resolved a device via the config. `stop_cmd` is best-effort: a
+failing one only logs, it never fails the command itself. `auto_stop`
+defaults to `false`, so plain `start_cmd` without it never disconnects
+anything on its own.
 
 ### Android user/profile targeting
 
