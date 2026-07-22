@@ -2333,6 +2333,17 @@ known_pkg_override() {
       # exactly app-release.apk, nothing else, out of ~30 assets.
       printf 'github§§ImranR98/Obtainium§app-release\\.apk$\n'
       ;;
+    com.topjohnwu.magisk)
+      # Magisk itself is never on Google Play or F-Droid -- it's normally
+      # sideloaded (installer=null/packageinstaller either way), so without
+      # this it'd always come out as a "store unknown" TODO. Can't rely on
+      # the default '\.apk$' asset pattern here: every release also ships
+      # an "app-debug.apk" alongside the real "Magisk-vX.Y.apk" (checked
+      # the last 5 releases, both assets present every time), so the
+      # default would match both and error out at install time -- this
+      # pattern narrows it to just the versioned release build.
+      printf 'github§§topjohnwu/Magisk§^Magisk-v.*\\.apk$\n'
+      ;;
     *)
       return 1
       ;;
@@ -2678,7 +2689,7 @@ cmd_generate_config() {
     fi
     printf '# store is detected from the installer attribution (pm list packages -i):\n'
     printf '#   com.android.vending -> gplay, org.fdroid.fdroid -> fdroid, Obtainium -> github.\n'
-    printf '# A few well-known packages (the F-Droid and Obtainium clients themselves) get\n'
+    printf '# A few well-known packages (the F-Droid/Obtainium clients, Magisk) get\n'
     printf '# a concrete, working store/url or store/repo/asset regardless of installer,\n'
     printf '# since their real source is always the same no matter how they got here.\n'
     printf '# The top-level default below covers the common case (gplay); only apps that\n'
@@ -2760,7 +2771,17 @@ cmd_generate_config() {
           entry_lines+=("    store: github")
           if [[ -n "$store_repo" ]]
           then
-            entry_lines+=("    repo: $store_repo" "    asset: '$store_asset'")
+            entry_lines+=("    repo: $store_repo")
+            # Only emit asset: when known_pkg_override actually gave one --
+            # app_rows/the config schema both treat a *missing* asset key as
+            # "default to '\.apk$'", but an empty string is present, not
+            # missing (`.asset // "\.apk$"` in jq/yq only substitutes on
+            # null/false, so `asset: ''` -- which this used to always write
+            # whenever store_asset was empty -- became a regex matching
+            # every asset in the release, not "let it default". Emitting no
+            # asset: line at all when there's nothing to override is the
+            # only way to actually mean "use the default".
+            [[ -n "$store_asset" ]] && entry_lines+=("    asset: '$store_asset'")
           else
             entry_lines+=('    repo: ""')
             todo="installed via Obtainium -- set repo/asset by hand, original repo is unknown"
