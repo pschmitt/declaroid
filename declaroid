@@ -4163,6 +4163,29 @@ sync_obtainium_repos() {
   then
     obtainium_pkg=dev.imranr.obtainium
   else
+    # A real (non-dry-run) apply installs configured apps -- including
+    # Obtainium itself, if it's one of them -- before ever reaching this
+    # function, so "not installed yet" here is a real, immediate error
+    # there. --dry-run never actually installs anything, though, so a
+    # config that both installs Obtainium via apps: and configures
+    # obtainium: repos would spuriously error on a fresh device's very
+    # first preview, even though the real run right after it would work
+    # fine (confirmed live: exactly this happened on a real device with
+    # Obtainium not yet installed but present in apps:). Softened for
+    # --dry-run only: if Obtainium is configured to be installed at all,
+    # this is expected, not a misconfiguration -- note it and move on
+    # rather than erroring. A config that configures obtainium: without
+    # installing Obtainium via apps: anywhere still correctly errors even
+    # in --dry-run, since no future real run would fix that either.
+    local -a would_install_pkgs
+    mapfile -t would_install_pkgs < <(yq -r '.apps[] | select(.pkg == "dev.imranr.obtainium" or .pkg == "dev.imranr.obtainium.fdroid") | select((.state.installed == false) | not) | .pkg' "$config")
+
+    if [[ -n "$DRY_RUN" && ${#would_install_pkgs[@]} -gt 0 ]]
+    then
+      log_ok "Obtainium (${would_install_pkgs[0]}) isn't installed on $device yet, but this apply would install it -- skipping the Obtainium repo(s) preview until then"
+      return 0
+    fi
+
     log_error "obtainium: entries are configured but neither dev.imranr.obtainium nor dev.imranr.obtainium.fdroid is installed on $device"
     return 1
   fi
