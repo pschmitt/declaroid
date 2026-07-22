@@ -1760,6 +1760,20 @@ cmd_apply() {
     return 2
   fi
 
+  # `enforce: true` in the config is equivalent to always passing
+  # --enforce -- an explicit `== true` comparison, not `//`, since the
+  # default (false) is what `//` would coalesce an absent key to anyway,
+  # but explicit comparison keeps this consistent with every other
+  # optional boolean in this file (see AGENTS.md's `.root.enabled // ""`
+  # entry for why `//` is avoided here on principle). The CLI flag and the
+  # config key OR together -- either one turning it on is enough.
+  if [[ -z "$enforce" ]]
+  then
+    local config_enforce
+    config_enforce="$(yq -r '.enforce == true' "$config")"
+    [[ "$config_enforce" == true ]] && enforce=1
+  fi
+
   local devices_raw
   if ! devices_raw="$(resolve_devices "$cli_device" "$config" "$bulk")"
   then
