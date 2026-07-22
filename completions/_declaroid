@@ -57,6 +57,7 @@ _declaroid_commands() {
     'install:Download (if needed) and install configured apps'
     'uninstall:Uninstall configured apps (no download)'
     'diff:Show installed vs missing apps, no changes made'
+    'modules:Show configured vs installed root modules (APatch/Magisk), no changes made'
     'search:Search Google Play and/or F-Droid'
     'add:Search, then append the picked app to the config'
     'devices:List connected adb devices'
@@ -98,6 +99,11 @@ _declaroid() {
             '--sort-by[Sort output]:key:(name pkg)' \
             '--full[Also list device apps that are not in the config]'
           ;;
+        modules)
+          _declaroid_common_args \
+            '--root-framework[Force which root framework to use]:framework:(apatch magisk)' \
+            '--full[Also list device modules that are not in the config]'
+          ;;
         search)
           _arguments \
             '--store[Store(s) to search]:store:(gplay fdroid izzyondroid any)' \
@@ -130,6 +136,7 @@ _declaroid() {
             '--system[Include system apps too]' \
             '(--no-labels --fast)'{--no-labels,--fast}'[Skip app name resolution]' \
             '(-j --jobs)'{-j,--jobs}'[Resolve up to N app names in parallel]:jobs' \
+            '--root-framework[Force which root framework to use]:framework:(apatch magisk)' \
             '(-h --help)'{-h,--help}'[Show help]'
           ;;
       esac

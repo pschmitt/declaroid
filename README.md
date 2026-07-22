@@ -129,6 +129,7 @@ $ declaroid COMMAND [OPTIONS]
 | `install` | Download (if not already cached) and install configured apps (shows a plan, prompts to confirm) |
 | `uninstall` | Uninstall configured apps (no download) |
 | `diff` | Show which configured apps are installed vs missing, no changes made (`--full`: also list device apps not in the config) |
+| `modules` | Show configured root modules (APatch/Magisk) vs what's on the device, read-only (`--full`: also list device modules not in the config) |
 | `search QUERY` | Search Google Play and/or F-Droid; no device or config needed |
 | `add QUERY` | Search, then append the picked app to the config (fzf picker if more than one match) |
 | `devices`, `list` | List connected adb devices (serial, model, codename, connection) |
@@ -150,7 +151,8 @@ $ declaroid COMMAND [OPTIONS]
 | `--system` | generate-config | Include system apps too (default: third-party only) |
 | `--no-labels, --fast` | generate-config | Skip app name resolution, use the package id instead |
 | `-j, --jobs N` | generate-config | Resolve up to N app names in parallel (default: 6) |
-| `--full` | diff | Also list device apps that aren't in the config, as `extra` |
+| `--full` | diff, modules | Also list device apps/modules that aren't in the config, as `extra` |
+| `--root-framework apatch\|magisk` | modules, generate-config | Force which root framework to use instead of the config's `root.framework`/auto-detection |
 | `--store gplay\|fdroid\|izzyondroid\|any` | search, add | Which store(s) to search (default: `any`; `izzyondroid` is opt-in, not part of `any`) |
 | `-l, --limit N` | search, add | Max results per store (default: 10) |
 | `--sort-by KEY` | diff, devices | Sort output case-insensitively. diff: `name` (default) or `pkg`. devices: `serial` (default), `model`, `codename`, or `connection` |
@@ -284,6 +286,57 @@ it's not given), so `store: fdroid` respects `profile:` too. `uninstall`
 doesn't pass `--user` at all -- it removes the app from wherever it's
 actually installed, on the theory that "uninstall X" should mean X is gone,
 not "gone from one specific profile, possibly still present in another."
+
+### Root modules (APatch/Magisk)
+
+`declaroid modules` shows which configured root modules -- [APatch](https://github.com/bmax121/APatch)
+APModules or [Magisk](https://github.com/topjohnwu/Magisk) modules, same
+on-disk format for either -- are actually installed/enabled on the device,
+read-only:
+
+```console
+$ declaroid modules
+INF Target device: 10.5.0.110:42539
+NAME                          ID              VERSION          ENABLED  STATUS
+Play Integrity Fix [INJECT]   playintegrityfix  v4.7-1-inject-s  yes      installed
+Tricky Store                  tricky_store      v1.4.1           yes      installed
+```
+
+`--full` also lists installed-but-unconfigured modules as `extra`, same as
+`diff --full` does for apps. **Nothing installs, enables, disables, or
+uninstalls a module** -- that's deliberately out of scope for now: module
+state changes only take effect on next boot for both frameworks, and
+APatch's own CLI `module install` has a documented failure mode the GUI
+app doesn't hit ([bmax121/APatch#633](https://github.com/bmax121/APatch/issues/633)),
+neither of which this has a good answer for yet.
+
+Config schema:
+
+```yaml
+root:
+  enabled: true|false   # optional; false skips root entirely, no auto-detection
+                         # attempted. Omit to auto-detect whether the device has
+                         # APatch or Magisk at all.
+  framework: apatch|magisk  # optional; skips auto-detection if you already know.
+                             # --root-framework overrides both of these, for a
+                             # single invocation (also works with generate-config).
+modules:
+  - id: <module id>      # matches the module's module.prop id= field
+    name: <display name>  # optional, cosmetic only
+    enabled: false         # optional, informational only for now
+```
+
+Framework detection (when `root.framework` isn't set) probes the device
+directly for the `apd`/`magisk` CLI binary through a root shell, not for
+either framework's own app package -- Magisk supports hiding/repackaging
+its manager app specifically to evade exactly that kind of check (confirmed
+against a real device: Magisk fully installed and running, `pm list
+packages com.topjohnwu.magisk` found nothing).
+
+`generate-config` picks this up automatically too: if a framework is
+detected, the generated config gets a `root:` section and a `modules:`
+list seeded from whatever's actually installed (skipped entirely for a
+non-rooted device -- no empty `root:`/`modules:` clutter).
 
 ### Stores
 

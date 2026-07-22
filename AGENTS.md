@@ -339,6 +339,96 @@ incomplete change, not a follow-up.
   `cmd_diff`/`cmd_devices`), inherited from before this was found -- same
   quirk likely applies there, just not yet fixed.
 
+## Root modules (APatch/Magisk)
+
+- **`adb shell su -c 'shell syntax here'` only works if the *entire*
+  `su -c '...'` reaches `adb shell` as ONE argument, not split across
+  `shell su -c '...'` as separate words.** Confirmed empirically: `su -c`
+  execs its argument directly (no shell involved) when adb hands it over
+  as several bare words -- fine for a plain binary + args (`su -c apd
+  module list` genuinely works that way, since Android's `su -c CMD arg
+  arg...` execs CMD with the trailing words as its own argv, no shell
+  needed), but a `for`/`;`/glob-bearing command silently breaks: adb
+  reconstructs the remote command line by rejoining `su`/`-c`/the (already
+  bash-parsed-away) quoted string with plain spaces, so shell keywords
+  land as bare top-level statements in the *outer* shell instead of inside
+  `-c`'s string, failing with `syntax error: unexpected 'do'`. Wrapping the
+  whole `su -c '...'` in an *outer* pair of double quotes before it ever
+  reaches `adb shell` (`adb shell "su -c '...'"` -- see `run_root_shell`)
+  fixes it: now adb receives one argument, so it can't rejoin/re-split
+  anything, and `su -c` gets the *whole* string, which is when it actually
+  invokes a shell to interpret it.
+- **Don't detect APatch/Magisk via their app package id.** Magisk
+  explicitly supports hiding/repackaging its own manager app under a
+  random package id, specifically to evade checks like `pm list packages
+  com.topjohnwu.magisk` -- confirmed against a real device: Magisk fully
+  installed and functional (`magisk -v` worked fine through a root shell),
+  but its app package was nowhere in `pm list packages` output.
+  `detect_root_framework` instead probes the root shell directly for the
+  `apd`/`magisk` CLI binary (`command -v`), the only signal that's
+  actually reliable for both.
+- **`command -v apd` needs its stderr silenced to work at all** -- without
+  `2>/dev/null`, a bare `su -c 'command -v apd'` (through the multi-word
+  form above, before finding the single-string fix) printed `apd:
+  inaccessible or not found` to stderr on a real device and the whole
+  probe read as a failure even though apd genuinely was on `$PATH`
+  (`/data/adb/ap/bin/apd`) once the single-string form was used and stderr
+  silenced.
+- **APatch's `apd module list` emits real JSON, with every field
+  (including booleans like `"enabled"`) as a *string*, not a JSON
+  boolean** -- confirmed against a real device's actual output
+  (`"enabled": "true"`, not `"enabled": true`). `list_apatch_modules`'s jq
+  filter compares against the string `"true"`, not the boolean.
+- **`apd module list`'s JSON is the source of truth for APatch, not a raw
+  `module.prop` directory scan.** A real device had a "TA_utl" module
+  directory (a Tricky Store companion) whose `module.prop` is
+  permission-denied even to a root shell -- `apd module list` simply
+  omits it from its JSON, which is the behavior worth matching, not
+  fighting.
+- **This build of Magisk's own CLI has no module-listing subcommand at
+  all** -- checked `magisk --help` against a real, running Magisk v30.7:
+  only `--install-module`/`--remove-modules` exist for modules, nothing
+  that lists them (unlike APatch's `apd module list`). `list_magisk_modules`
+  falls back to the traditional method every Magisk module itself relies
+  on: read `module.prop` out of each `/data/adb/modules/<id>/` directory,
+  check for a `disable` marker file. This also works against APatch
+  devices (confirmed): both frameworks use the identical directory/
+  `module.prop`/marker-file convention, `apd`'s JSON is just APatch's own
+  nicer wrapper around the same data.
+- **`list_magisk_modules` pushes a real script to the device via `adb
+  push` and runs that, instead of inlining the for-loop through
+  `run_root_shell` directly.** The loop needs to quote each module's own
+  path (`"${d}module.prop"`), which would have to nest inside the single
+  quotes `run_root_shell`'s `su -c '...'` already needs -- the same
+  escaping-inside-escaping problem `pick_search_result`'s fzf preview
+  script hit, solved the same way here.
+- **Untested against real Magisk module *content*.** The only Magisk
+  device available while building this had zero modules installed, so the
+  empty-list path is verified for real, but the actual `module.prop`
+  key=value parsing in `list_magisk_modules` is only verified against
+  real-world `module.prop` files pulled from an *APatch* device (same
+  format, per the point above) -- re-verify against a real Magisk device
+  with modules installed if one becomes available.
+- **`.root.enabled // ""` is wrong and was a real bug here** -- jq/yq's
+  `//` treats a `false` *value* the same as a *missing* key (both
+  falsy), so it silently discarded an explicit `root.enabled: false` and
+  fell through to auto-detection anyway, doing the opposite of what the
+  config asked for (caught by testing against a real config with
+  `root.enabled: false` set: it still queried the device and returned
+  results). Fixed by comparing directly (`.root.enabled == false`)
+  instead of coalescing with `//` -- the third time this exact class of
+  bug has shown up in this file (see the `asset: ''` and the `§`-vs-tab
+  entries above): jq/yq's `//` cannot distinguish "present but falsy"
+  from "absent," so never reach for it when that distinction matters.
+- Deliberately no install/enable/disable/uninstall support yet --
+  `cmd_modules` is read-only (drift reporting only, same shape as
+  `cmd_diff`). Two open problems stand in the way of going further: module
+  state changes only take effect on next boot for both frameworks (no
+  reboot orchestration exists in this codebase), and APatch's own CLI
+  `module install` has a documented failure mode
+  ([bmax121/APatch#633](https://github.com/bmax121/APatch/issues/633))
+  that its GUI app doesn't hit, with no known root cause.
+
 ## Nix packaging
 
 - `pkgs/declaroid/default.nix` wraps the script with `makeWrapper`, prefixing

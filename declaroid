@@ -78,6 +78,9 @@ ${C_BOLD}Commands:${C_RESET}
   ${C_CYAN}uninstall${C_RESET}   Uninstall configured apps (no download)
   ${C_CYAN}diff${C_RESET}        Show which configured apps are installed vs missing, no changes made
               (--full also lists device apps that aren't in the config)
+  ${C_CYAN}modules${C_RESET}     Show configured root modules (APatch APModules/Magisk modules)
+              vs what's actually on the device, read-only, no changes made
+              (--full also lists device modules that aren't in the config)
   ${C_CYAN}search${C_RESET} QUERY
               Search Google Play and/or F-Droid, print a colored table with
               clickable (OSC 8) links, no device or config needed
@@ -106,7 +109,11 @@ ${C_BOLD}Options:${C_RESET}
       ${C_YELLOW}--system${C_RESET}            (generate-config only) Include system apps too (default: third-party only)
       ${C_YELLOW}--no-labels, --fast${C_RESET} (generate-config only) Skip resolving app names via aapt2, use the package id instead (faster)
   ${C_YELLOW}-j, --jobs N${C_RESET}          (generate-config only) Resolve up to N app names in parallel (default: 6)
-      ${C_YELLOW}--full${C_RESET}              (diff only) Also list device apps that aren't in the config, as "extra"
+      ${C_YELLOW}--full${C_RESET}              (diff, modules) Also list device apps/modules that aren't in the
+                          config, as "extra"
+      ${C_YELLOW}--root-framework apatch|magisk${C_RESET}
+                          (modules, generate-config) Force which root framework to use
+                          instead of the config's root.framework/auto-detection
       ${C_YELLOW}--store gplay|fdroid|izzyondroid|any${C_RESET}
                           (search, add) Which store(s) to search (default: any;
                           izzyondroid is opt-in, not part of "any")
@@ -139,6 +146,19 @@ ${C_BOLD}Config schema:${C_RESET}
   profiles:                                   # optional, gives profile: short aliases
     - name: <alias, e.g. work>
       id: <user id, e.g. 10>
+  root:                                        # optional; root/module management (see modules: below)
+    enabled: true|false                        # optional; false skips root entirely, no
+                                                # auto-detection attempted. Omit to auto-detect
+                                                # whether the device has APatch or Magisk at all.
+    framework: apatch|magisk                   # optional; which one, if you already know (skips
+                                                # auto-detection). --root-framework overrides both
+                                                # of these for a single invocation.
+  modules:                                     # optional; root modules (APatch APModules and
+                                                # Magisk modules use the same on-disk format)
+    - id: <module id>                          # matches the module's module.prop id= field
+      name: <display name>                     # optional, cosmetic only (shown by "modules")
+      enabled: false                           # optional; informational only for now ("modules"
+                                                # is read-only -- see the modules command above)
   apps:
     - name: <display name>
       pkg: <package id>
@@ -179,8 +199,15 @@ so repeated installs don't re-download (see --force-download). fdroid and
 izzyondroid apps are cached by fdroidcl itself; local apps aren't cached
 (nothing to cache).
 
-Table output (devices, diff) is rendered with tsvtool if it's on \$PATH
-(https://github.com/pschmitt/tsvtool), otherwise with column -t.
+root/modules management (APatch APModules, Magisk modules) is read-only for
+now: \`modules\` reports drift, nothing installs/enables/disables/uninstalls
+a module. Framework detection (when root.framework isn't set) probes the
+device directly for the apd/magisk CLI, not for either app's package id --
+Magisk supports hiding/repackaging its own app specifically to evade that
+kind of check, so it isn't a reliable signal.
+
+Table output (devices, diff, modules) is rendered with tsvtool if it's on
+\$PATH (https://github.com/pschmitt/tsvtool), otherwise with column -t.
 EOF
 }
 
@@ -2282,6 +2309,143 @@ cmd_diff() {
   done
 }
 
+# Read-only, same shape as cmd_diff but for root modules (APatch APModules
+# / Magisk modules -- same on-disk convention, one command covers either)
+# instead of apps: shows each configured module's install/enabled state on
+# the device, `--full` also lists installed-but-unconfigured modules as
+# "extra". Does not install/enable/disable/uninstall anything -- that's
+# deliberately out of scope for now (see AGENTS.md for why: module state
+# changes only take effect on next boot for both frameworks, and APatch's
+# own `module install` has a documented CLI-only failure mode the GUI
+# doesn't hit, neither of which this codebase has a good answer for yet).
+cmd_modules() {
+  local config="$DEFAULT_CONFIG"
+  local cli_device=""
+  local cli_framework=""
+  local bulk=""
+  local full=""
+
+  while [[ -n "${1:-}" ]]
+  do
+    case "$1" in
+      -h|--help)
+        usage
+        return 0
+        ;;
+      -c|--config)
+        config="$2"
+        shift 2
+        ;;
+      -d|--device)
+        cli_device="$2"
+        shift 2
+        ;;
+      --root-framework)
+        cli_framework="$2"
+        shift 2
+        ;;
+      --bulk|--all-devices|--all)
+        bulk=1
+        shift
+        ;;
+      --full)
+        full=1
+        shift
+        ;;
+      *)
+        log_error "Unknown option: $1"
+        usage >&2
+        return 2
+        ;;
+    esac
+  done
+
+  case "$cli_framework" in
+    ""|apatch|magisk)
+      ;;
+    *)
+      log_error "Invalid --root-framework value: $cli_framework (expected apatch or magisk)"
+      return 2
+      ;;
+  esac
+
+  check_deps adb yq jq
+
+  if [[ ! -f "$config" ]]
+  then
+    log_error "Config file not found: $config"
+    return 2
+  fi
+
+  local devices_raw
+  if ! devices_raw="$(resolve_devices "$cli_device" "$config" "$bulk")"
+  then
+    return 2
+  fi
+
+  local -a devices
+  mapfile -t devices <<< "$devices_raw"
+
+  local -a configured_rows
+  mapfile -t configured_rows < <(yq -r '(.modules // [])[] | [.id, (.name // .id)] | join("§")' "$config")
+
+  local DEVICE_SERIAL framework
+  for DEVICE_SERIAL in "${devices[@]}"
+  do
+    log_step "Target device: $DEVICE_SERIAL"
+
+    if ! framework="$(resolve_root_framework "$config" "$cli_framework" "$DEVICE_SERIAL")"
+    then
+      log_ok "Root not enabled/detected on $DEVICE_SERIAL"
+      continue
+    fi
+
+    local -a device_rows
+    mapfile -t device_rows < <(list_root_modules "$DEVICE_SERIAL" "$framework")
+
+    {
+      printf 'NAME\tID\tVERSION\tENABLED\tSTATUS\n'
+      {
+        local crow cid cname drow did dname dversion denabled found
+        for crow in "${configured_rows[@]}"
+        do
+          IFS='§' read -r cid cname <<< "$crow"
+          found=""
+
+          for drow in "${device_rows[@]}"
+          do
+            IFS=$'\t' read -r did dname dversion denabled <<< "$drow"
+            if [[ "$did" == "$cid" ]]
+            then
+              printf '%s\t%s\t%s\t%s\tinstalled\n' "$dname" "$did" "$dversion" "$denabled"
+              found=1
+              break
+            fi
+          done
+
+          [[ -z "$found" ]] && printf '%s\t%s\t%s\t%s\tmissing\n' "$cname" "$cid" "-" "-"
+        done
+
+        if [[ -n "$full" ]]
+        then
+          for drow in "${device_rows[@]}"
+          do
+            IFS=$'\t' read -r did dname dversion denabled <<< "$drow"
+            found=""
+            for crow in "${configured_rows[@]}"
+            do
+              IFS='§' read -r cid cname <<< "$crow"
+              [[ "$did" == "$cid" ]] && found=1 && break
+            done
+            [[ -n "$found" ]] && continue
+            printf '%s\t%s\t%s\t%s\textra\n' "$dname" "$did" "$dversion" "$denabled"
+          done
+        fi
+      } | sort -t $'\t' -k1,1 -f
+    } | render_table | colorize_word installed "$C_GREEN" | colorize_word missing "$C_YELLOW" | colorize_word extra "$C_RED"
+  done
+}
+
 # `pm list packages -i` reports the installer attribution package, which is
 # a decent (if imperfect) signal for where an app actually came from:
 #   com.android.vending           -> the Play Store app itself       -> gplay
@@ -2413,6 +2577,212 @@ yaml_quote_scalar() {
   printf '"%s"\n' "$s"
 }
 
+# Runs $2 through a root shell on device $1. The whole `su -c '...'` must
+# reach `adb shell` as ONE argument, not as several bare words split across
+# `shell su -c '...'` -- confirmed empirically: `su -c` execs its argument
+# directly (no shell involved) when handed multiple separate words, so
+# shell syntax (`;`, `for`/`do`/`done`, glob expansion) only works when the
+# whole command reaches it as a single string. `adb shell "su -c 'X'"`
+# (this function's exact form) gives it that single string; `adb shell su
+# -c 'X'` does not -- it silently reconstructs the remote command by
+# rejoining `su`/`-c`/`X` with spaces, which either drops X's quoting
+# entirely or (for anything with shell keywords in it) fails outright with
+# `syntax error: unexpected 'do'` from the remote shell. Wrapped in a
+# timeout since, unlike every other adb call in this script, this one can
+# genuinely hang forever if root was never granted to Shell and the
+# framework's app is sitting on an unanswered superuser prompt on-screen.
+run_root_shell() {
+  local device="$1"
+  local cmd="$2"
+
+  timeout 15 adb -s "$device" shell "su -c '$cmd'" </dev/null 2>/dev/null | tr -d '\r'
+}
+
+# Prints "apatch" or "magisk" (whichever's CLI binary is reachable through
+# a root shell) and returns 0, or returns 1 with no output if neither is.
+# Deliberately does NOT check for the frameworks' own app packages
+# (`me.bmax.apatch`/`com.topjohnwu.magisk`) as a shortcut -- Magisk
+# explicitly supports hiding/repackaging its own manager app under a
+# random package id specifically to evade exactly this kind of check
+# (confirmed against a real device: Magisk was fully installed and
+# running, but `pm list packages com.topjohnwu.magisk` found nothing) --
+# so probing the root shell directly is the only way that's actually
+# reliable for both.
+detect_root_framework() {
+  local device="$1"
+
+  if [[ -n "$(run_root_shell "$device" 'command -v apd')" ]]
+  then
+    printf 'apatch\n'
+    return 0
+  fi
+
+  if [[ -n "$(run_root_shell "$device" 'command -v magisk')" ]]
+  then
+    printf 'magisk\n'
+    return 0
+  fi
+
+  return 1
+}
+
+# Resolves which root framework applies, in priority order: an explicit
+# --root-framework always wins; otherwise the config's `root.framework` is
+# used, unless `root.enabled` is explicitly `false` (in which case root
+# module handling is skipped entirely, no auto-detection attempted);
+# falling back to detect_root_framework against the device if the config
+# doesn't pin one down either. Prints the framework name and returns 0, or
+# prints nothing and returns 1 if root module handling doesn't apply here
+# (explicitly disabled, or nothing usable found).
+resolve_root_framework() {
+  local config="$1"
+  local cli_framework="$2"
+  local device="$3"
+  local explicitly_disabled cfg_framework
+
+  if [[ -n "$cli_framework" ]]
+  then
+    printf '%s\n' "$cli_framework"
+    return 0
+  fi
+
+  if [[ -n "$config" && -f "$config" ]]
+  then
+    # NOT `.root.enabled // ""` -- jq/yq's `//` treats a `false` *value* the
+    # same as a *missing* key (both are falsy), so that would've silently
+    # thrown away an explicit `root.enabled: false` and fed it right back
+    # into the auto-detect path below, doing the opposite of what the
+    # config asked for. Comparing directly against `false` sidesteps `//`
+    # entirely -- confirmed against a real config with `root.enabled: false`
+    # set, which this second form correctly short-circuits on.
+    explicitly_disabled="$(yq -r '.root.enabled == false' "$config")"
+    [[ "$explicitly_disabled" == "true" ]] && return 1
+
+    cfg_framework="$(yq -r '.root.framework // ""' "$config")"
+    if [[ -n "$cfg_framework" ]]
+    then
+      printf '%s\n' "$cfg_framework"
+      return 0
+    fi
+  fi
+
+  detect_root_framework "$device"
+}
+
+# apd's own `module list` JSON is the source of truth for which modules
+# APatch actually recognizes -- a raw module.prop directory scan would
+# also pick up modules apd itself skips (seen for real: a "TA_utl"
+# companion module directory whose module.prop is permission-denied even
+# to a root shell; apd's list simply omits it). All fields in this JSON
+# are emitted as strings by apd itself, "true"/"false" included -- not
+# JSON booleans, confirmed against a real device's output.
+# Emits id\tname\tversion\tenabled(yes/no) rows.
+list_apatch_modules() {
+  local device="$1"
+  local json
+
+  json="$(run_root_shell "$device" 'apd module list')"
+  [[ -z "$json" ]] && return 0
+
+  printf '%s' "$json" | jq -r '.[] | [.id, .name, .version, (if .enabled == "true" then "yes" else "no" end)] | @tsv'
+}
+
+# Unlike APatch, this build of Magisk has no `--list-modules` (or any
+# module-listing) subcommand at all -- checked `magisk --help` against a
+# real device: only --install-module/--remove-modules exist for modules,
+# nothing that lists them. Falls back to the traditional method every
+# Magisk module itself relies on: read module.prop out of each
+# /data/adb/modules/<id>/ directory, and check for a `disable` marker file
+# (Magisk's own "installed but disabled" convention -- a module is fully
+# removed via a `remove` marker instead, but that's a pending-uninstall
+# state that shouldn't matter for what this reports, so it isn't checked).
+# Pushes a small script to the device and runs it via su rather than
+# inlining the for-loop directly through run_root_shell: that would need
+# the loop's own single quotes (for module.prop's path) nested inside the
+# `su -c '...'` single-quoting run_root_shell already needs, which is
+# exactly the kind of escaping-inside-escaping this codebase avoids
+# elsewhere (see pick_search_result's preview script, same reasoning).
+# Emits id\tname\tversion\tenabled(yes/no) rows.
+list_magisk_modules() {
+  local device="$1"
+  local script remote_path
+
+  script="$(mktemp)"
+  cat > "$script" <<'MAGISK_SCAN_EOF'
+#!/system/bin/sh
+for d in /data/adb/modules/*/
+do
+  printf '===MODULE===\n'
+  cat "${d}module.prop" 2>/dev/null
+  [ -f "${d}disable" ] && printf 'declaroid_disabled=1\n'
+done
+MAGISK_SCAN_EOF
+
+  remote_path="/data/local/tmp/declaroid-list-magisk-modules.sh"
+  if ! adb -s "$device" push "$script" "$remote_path" >/dev/null 2>&1
+  then
+    rm -f "$script"
+    return 1
+  fi
+  rm -f "$script"
+
+  local -a lines
+  mapfile -t lines < <(run_root_shell "$device" "sh $remote_path")
+  adb -s "$device" shell "rm -f $remote_path" >/dev/null 2>&1
+
+  local line key val id="" name="" version="" enabled="yes" have_module=""
+
+  for line in "${lines[@]}"
+  do
+    if [[ "$line" == "===MODULE===" ]]
+    then
+      if [[ -n "$have_module" && -n "$id" ]]
+      then
+        [[ -z "$name" ]] && name="$id"
+        printf '%s\t%s\t%s\t%s\n' "$id" "$name" "$version" "$enabled"
+      fi
+      id="" name="" version="" enabled="yes"
+      have_module=1
+      continue
+    fi
+
+    [[ "$line" == *=* ]] || continue
+    key="${line%%=*}"
+    val="${line#*=}"
+
+    case "$key" in
+      id) id="$val" ;;
+      name) name="$val" ;;
+      version) version="$val" ;;
+      declaroid_disabled) enabled="no" ;;
+    esac
+  done
+
+  if [[ -n "$have_module" && -n "$id" ]]
+  then
+    [[ -z "$name" ]] && name="$id"
+    printf '%s\t%s\t%s\t%s\n' "$id" "$name" "$version" "$enabled"
+  fi
+}
+
+list_root_modules() {
+  local device="$1"
+  local framework="$2"
+
+  case "$framework" in
+    apatch)
+      list_apatch_modules "$device"
+      ;;
+    magisk)
+      list_magisk_modules "$device"
+      ;;
+    *)
+      log_error "Unknown root framework '$framework' (expected apatch or magisk)"
+      return 1
+      ;;
+  esac
+}
+
 # Cached alongside per-package APK downloads under $CACHE_ROOT/<pkg>/ --
 # `declaroid clear-cache [pkg]` already wipes that whole directory, so label
 # caching gets cache invalidation for free without any extra bookkeeping.
@@ -2475,6 +2845,7 @@ cmd_generate_config() {
   local include_system=""
   local resolve_names=1
   local jobs=6
+  local cli_root_framework=""
 
   while [[ -n "${1:-}" ]]
   do
@@ -2503,6 +2874,10 @@ cmd_generate_config() {
         jobs="$2"
         shift 2
         ;;
+      --root-framework)
+        cli_root_framework="$2"
+        shift 2
+        ;;
       *)
         log_error "Unknown option: $1"
         usage >&2
@@ -2510,6 +2885,15 @@ cmd_generate_config() {
         ;;
     esac
   done
+
+  case "$cli_root_framework" in
+    ""|apatch|magisk)
+      ;;
+    *)
+      log_error "Invalid --root-framework value: $cli_root_framework (expected apatch or magisk)"
+      return 2
+      ;;
+  esac
 
   check_deps adb
 
@@ -2712,6 +3096,34 @@ cmd_generate_config() {
       printf '  - name: %s\n' "${profile_names[$pidx2]}"
       printf '    id: %s\n' "${profile_ids[$pidx2]}"
     done
+
+    local root_framework
+    if root_framework="$(resolve_root_framework "" "$cli_root_framework" "$device")"
+    then
+      printf 'root:\n'
+      printf '  enabled: true\n'
+      printf '  framework: %s\n' "$root_framework"
+
+      local -a module_rows
+      mapfile -t module_rows < <(list_root_modules "$device" "$root_framework")
+
+      if [[ ${#module_rows[@]} -gt 0 ]]
+      then
+        printf 'modules:\n'
+        local mrow mid mname mversion menabled
+        for mrow in "${module_rows[@]}"
+        do
+          # mversion isn't written to the config (only id/name/enabled
+          # are) -- it's runtime info, shown by `modules`, not declared intent.
+          # shellcheck disable=SC2034
+          IFS=$'\t' read -r mid mname mversion menabled <<< "$mrow"
+          printf '  - id: %s\n' "$mid"
+          printf '    name: %s\n' "$(yaml_quote_scalar "$mname")"
+          [[ "$menabled" == "no" ]] && printf '    enabled: false\n'
+        done
+      fi
+    fi
+
     printf 'apps:\n'
 
     local store name resolved todo profile_field override store_url store_repo store_asset
@@ -2854,6 +3266,9 @@ main() {
       ;;
     diff)
       cmd_diff "$@"
+      ;;
+    modules)
+      cmd_modules "$@"
       ;;
     search)
       cmd_search "$@"
