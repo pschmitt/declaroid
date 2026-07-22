@@ -517,7 +517,19 @@ incomplete change, not a follow-up.
   array as `imports:` would be wrong: `imports:` cycle-checks are scoped to
   one `resolve_config` call's own import graph, while `configs:` fan-out
   spans multiple independent `resolve_config` calls (one per leaf) that
-  must each start with a clean slate.
+  must each start with a clean slate. `expand_meta_configs` is the thin
+  wrapper that actually declares `META_SEEN` (once per top-level call) and
+  is what every real caller (`run_meta_config`, tests) goes through --
+  `collect_meta_configs` itself can't declare it, since it's the recursive
+  function and a fresh `local` per recursive call would defeat its own
+  cycle detection. Same shape as `resolve_config` declaring `SEEN` around
+  `collect_imports` for exactly the same reason. Caught by shellcheck
+  itself, not spotted by inspection: a bats test that `declare -A
+  META_SEEN=()` and called `collect_meta_configs` directly (skipping this
+  wrapper) got flagged SC2034 ("appears unused") in CI, since shellcheck
+  can't see the sourced production function that actually reads it --
+  fixed by adding the wrapper and pointing every caller, tests included,
+  at it instead.
   Each `cmd_*` captures `orig_args=("$@")` as its very first line (before
   its own option-parsing loop consumes `$@` via `shift`), specifically so
   `run_meta_config` can still forward the *original*, unconsumed argv to

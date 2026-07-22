@@ -16,25 +16,22 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
-@test "collect_meta_configs: expands configs: into leaf paths, in listed order" {
-  declare -A META_SEEN=()
-  run collect_meta_configs "$(fixture meta_configs/meta.yaml)"
+@test "expand_meta_configs: expands configs: into leaf paths, in listed order" {
+  run expand_meta_configs "$(fixture meta_configs/meta.yaml)"
   [ "$status" -eq 0 ]
   [[ "${lines[0]}" == *leaf_a.yaml ]]
   [[ "${lines[1]}" == *leaf_b.yaml ]]
 }
 
-@test "collect_meta_configs: a leaf with no configs: of its own prints itself" {
-  declare -A META_SEEN=()
-  run collect_meta_configs "$(fixture meta_configs/leaf_a.yaml)"
+@test "expand_meta_configs: a leaf with no configs: of its own prints itself" {
+  run expand_meta_configs "$(fixture meta_configs/leaf_a.yaml)"
   [ "$status" -eq 0 ]
   [ "${#lines[@]}" -eq 1 ]
   [[ "${lines[0]}" == *leaf_a.yaml ]]
 }
 
-@test "collect_meta_configs: a real cycle is detected and rejected" {
-  declare -A META_SEEN=()
-  run collect_meta_configs "$(fixture meta_configs/meta_cycle_a.yaml)"
+@test "expand_meta_configs: a real cycle is detected and rejected" {
+  run expand_meta_configs "$(fixture meta_configs/meta_cycle_a.yaml)"
   [ "$status" -eq 1 ]
   [[ "$output" == *"Cycle detected"* ]]
 }

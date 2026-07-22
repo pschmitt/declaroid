@@ -1995,6 +1995,18 @@ collect_meta_configs() {
   done
 }
 
+# Thin entry point around collect_meta_configs: declares its recursion's
+# cycle-detection map (META_SEEN) once per top-level call, the same
+# relationship resolve_config has to collect_imports (a fresh SEEN isn't
+# something collect_meta_configs could declare for itself without breaking
+# cycle detection across its own recursive calls into itself). Every real
+# caller should go through this, never call collect_meta_configs directly.
+expand_meta_configs() {
+  local config="$1"
+  local -A META_SEEN=()
+  collect_meta_configs "$config"
+}
+
 # True (rc 0) if $config's own top-level `configs:` is a non-empty list --
 # the signal that it's a *meta-config* (a fan-out list of other config
 # files, see collect_meta_configs) rather than a normal single-device
@@ -2059,9 +2071,8 @@ run_meta_config() {
     return 2
   fi
 
-  local -A META_SEEN=()
   local -a leaf_configs
-  mapfile -t leaf_configs < <(collect_meta_configs "$config") || return 2
+  mapfile -t leaf_configs < <(expand_meta_configs "$config") || return 2
 
   local -a filtered_args
   mapfile -t filtered_args < <(strip_config_flag "${orig_args[@]}")
