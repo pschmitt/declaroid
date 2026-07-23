@@ -172,8 +172,13 @@ The value is matched as a case-insensitive substring against each connected
 device's serial, USB path, product, model, and codename (e.g. "redfin",
 "clover", an IP, or part of a serial) -- so it doesn't need to be exact. Run
 ${C_CYAN}declaroid devices${C_RESET} to see what's connected and matchable.
-If it matches more than one connected device, declaroid errors out unless
---bulk/--all-devices/--all is given, in which case every match is used.
+If it matches more than one connected device, they're first collapsed down
+to one per real physical device (a network connection's "serial" is really
+just its endpoint, e.g. an IP or a hostname -- the same device reachable
+both ways at once shows up as two, until this de-dup by actual hardware
+serial via getprop). If that leaves exactly one, it's used with no further
+prompting; otherwise declaroid errors out unless --bulk/--all-devices/--all
+is given, in which case every match is used.
 If nothing resolves at all, you'll be prompted to pick from connected
 devices (or, with --bulk, every connected device is used).
 
@@ -548,6 +553,61 @@ prompt_pick_device() {
   done
 }
 
+# The real, stable hardware identity of a connected device -- as opposed to
+# the "serial" column `adb devices -l` reports, which for a *network* adb
+# connection is really just the connection endpoint (IP:port or
+# hostname:port), not the device itself. The same physical device can be
+# simultaneously reachable through more than one such endpoint (e.g. a raw
+# IP and a mDNS `.lan` hostname, both open at once to the same tablet --
+# confirmed live: `getprop ro.serialno` returned the identical value,
+# "dcd9de41", for both `10.5.0.159:35036` and `mi-pad-4.lan:35036`), which
+# `adb devices -l` has no way to express -- it just lists every open
+# connection as if it were its own independent device. `ro.serialno` is
+# tried first (set on every real device tested); `ro.boot.serialno` is a
+# fallback for older/custom ROMs where it isn't. Falls back to the
+# connection string itself if neither prop resolves (an adb hiccup, or a
+# device that genuinely has neither) -- deliberately never silently merges
+# two candidates it couldn't positively confirm are the same hardware.
+real_device_serial() {
+  local device="$1"
+  local serial
+
+  serial="$(adb -s "$device" shell getprop ro.serialno </dev/null 2>/dev/null | tr -d '\r\n')"
+  if [[ -z "$serial" ]]
+  then
+    serial="$(adb -s "$device" shell getprop ro.boot.serialno </dev/null 2>/dev/null | tr -d '\r\n')"
+  fi
+
+  if [[ -n "$serial" ]]
+  then
+    printf '%s\n' "$serial"
+  else
+    printf '%s\n' "$device"
+  fi
+}
+
+# Collapses a list of already query-filtered `adb devices -l` lines down to
+# one per real physical device (see real_device_serial) -- keeping the
+# first occurrence of each, in the order given. Only worth calling once
+# there's more than one candidate: the getprop round trip per candidate is
+# pure overhead in the (overwhelmingly common) single-match case, so every
+# caller skips it then.
+dedupe_matched_devices() {
+  local -a candidates=("$@")
+  local -A seen=()
+  local c serial
+
+  for c in "${candidates[@]}"
+  do
+    serial="$(real_device_serial "${c%% *}")"
+    if [[ -z "${seen[$serial]:-}" ]]
+    then
+      seen["$serial"]=1
+      printf '%s\n' "$c"
+    fi
+  done
+}
+
 resolve_devices() {
   local cli_device="$1"
   local config="$2"
@@ -632,6 +692,13 @@ resolve_devices() {
   then
     log_error "No connected device matches '$query'"
     return 1
+  fi
+
+  if [[ ${#matched[@]} -gt 1 ]]
+  then
+    local -a deduped_matched
+    mapfile -t deduped_matched < <(dedupe_matched_devices "${matched[@]}")
+    matched=("${deduped_matched[@]}")
   fi
 
   if [[ ${#matched[@]} -eq 1 ]]

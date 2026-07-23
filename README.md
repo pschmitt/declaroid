@@ -360,14 +360,29 @@ so `redfin`, `clover`, part of a serial, or an IP address all work, and it
 doesn't need to be an exact match.
 
 - **Exactly one match** → that device is used.
-- **Multiple matches** → declaroid errors out and lists what matched, unless
-  `--bulk`/`--all-devices`/`--all` is given, in which case *every* matching
-  device is targeted (apply/uninstall runs once per device).
+- **Multiple matches** → first collapsed down to one per *real* physical
+  device (see below), then: if that leaves exactly one, it's used with no
+  further prompting; otherwise declaroid errors out and lists what matched,
+  unless `--bulk`/`--all-devices`/`--all` is given, in which case *every*
+  matching device is targeted (apply/uninstall runs once per device).
 - **No query at all** (nothing set via flag, env, or config) and more than
   one device connected → you're prompted interactively to pick one, unless
   `--bulk` is given, in which case every connected device is targeted.
 - **No query and exactly one device connected** → that device is used, no
   prompt.
+
+For a *network* adb connection, the "serial" `adb devices -l` reports is
+really just the connection endpoint (an IP:port or hostname:port), not the
+device itself -- the same physical device can be simultaneously reachable
+through more than one such endpoint (a raw IP and a mDNS `.lan` hostname
+both connected at once to the same tablet is a real, observed case, not a
+hypothetical). Whenever more than one candidate matches, declaroid checks
+each one's actual hardware serial (`getprop ro.serialno`, falling back to
+`ro.boot.serialno`) and collapses duplicates down to a single entry before
+doing anything else -- so a device reachable two ways doesn't get every
+apply/uninstall/diff/modules step run twice against it, and doesn't
+force `--bulk`/a more specific query just because of how it happens to be
+connected right now.
 
 If no device is connected at all, or none match, and the config sets
 `adb.start_cmd`, that command is run once (via `bash -c`) and device

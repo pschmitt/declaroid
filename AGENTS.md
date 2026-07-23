@@ -546,6 +546,27 @@ incomplete change, not a follow-up.
   behavior silently -- there's no non-surprising way to decide whether
   such a file's `apps:` means anything once `configs:` is also fanning out
   to other files that have their own.
+- **`adb devices -l`'s "serial" column is a *connection* identity for a
+  network device, not a *hardware* identity -- confirmed live, not assumed,
+  and it broke real usage (`--all-devices`/`--bulk` double-processing the
+  same physical tablet), not just a theoretical gap.** A wireless-adb
+  tablet was simultaneously reachable as both `10.5.0.159:35036` (raw IP)
+  and `mi-pad-4.lan:35036` (mDNS hostname); `adb devices -l` lists both as
+  independent devices, and `resolve_devices`'s substring query matching
+  (e.g. `clover`, the codename) had no way to know they're the same
+  physical unit. `getprop ro.serialno`/`ro.boot.serialno` against each
+  confirmed the real fix target: both endpoints returned the identical
+  `dcd9de41`. `real_device_serial`/`dedupe_matched_devices` resolve and
+  collapse duplicates by that value, called from `resolve_devices` only
+  once `${#matched[@]} -gt 1` -- the getprop round trip is pure overhead in
+  the single-match case, the overwhelming majority of real invocations, so
+  it's skipped entirely then. This also incidentally fixed a second
+  observed symptom: a plain (non-bulk) query that happened to match two
+  connections to the same real device used to be rejected as "multiple
+  devices match, use --bulk" even though there was really only one
+  candidate underneath -- now it resolves cleanly with no flag needed,
+  since the dedup runs before the ambiguous-match error path is ever
+  reached.
 - **A `trap ... EXIT` (or `RETURN`) referencing a `local` variable in
   single-quoted form is broken, and this was caught the hard way, not
   reasoned out in advance.** `resolve_config`'s resolved-path temp file
