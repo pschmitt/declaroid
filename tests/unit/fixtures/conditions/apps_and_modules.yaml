@@ -1,0 +1,30 @@
+device: test
+apps:
+  - name: "APatch"
+    pkg: me.bmax.apatch
+    store: fdroid
+    if:
+      ro.product.device: redfin
+
+  - name: "Magisk"
+    pkg: com.topjohnwu.magisk
+    store: github
+    repo: topjohnwu/Magisk
+    if:
+      ro.product.device: clover
+
+  - name: "Always"
+    pkg: com.example.always
+
+modules:
+  - id: apatch-only-module
+    name: "APatch-only module"
+    source: github
+    repo: some/apatch-module
+    if:
+      ro.product.device: redfin
+
+  - id: always-module
+    name: "Always module"
+    source: github
+    repo: some/always-module

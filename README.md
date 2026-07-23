@@ -978,6 +978,58 @@ but shouldn't be) or `removed` (correctly absent), and any app actually
 disabled on the device (regardless of what `state.disabled` says) shows as
 `disabled` instead of `installed`.
 
+### `if:` -- per-device conditions on an apps:/modules: entry
+
+Any `apps:` or `modules:` entry can have an `if:` block: a device that
+doesn't match it behaves as if that entry weren't in the config at all, for
+that device only -- not installed, not uninstalled, and (`--enforce`/
+`--full`) counted as "extra"/unconfigured if it happens to be present
+anyway. This is what lets one shared, imported file pick a different app
+per device without a separate per-device override for each one:
+
+```yaml
+# imports/root.yaml, imported by both px5 (Pixel 5, codename redfin) and
+# mp4 (Mi Pad 4, codename clover)
+apps:
+  - name: "APatch"
+    pkg: me.bmax.apatch
+    store: fdroid
+    if:
+      ro.product.device: redfin
+
+  - name: "Magisk"
+    pkg: com.topjohnwu.magisk
+    store: github
+    repo: topjohnwu/Magisk
+    if:
+      ro.product.device: clover
+```
+
+A `<condition>` is a map of `getprop` property name to its exact expected
+value (as reported by `adb shell getprop`, e.g. `ro.product.device`,
+`ro.build.characteristics`); multiple keys AND together. Two keys are
+special rather than getprop names:
+
+- **`not:`** negates its own nested `<condition>`.
+- **`or:`** is true if *any* `<condition>` in its list is true.
+
+Both can nest arbitrarily deep, and can sit alongside plain getprop keys in
+the same map (still ANDed with them):
+
+```yaml
+if:
+  ro.build.characteristics: tablet
+  not:
+    ro.product.manufacturer: acme
+```
+
+Evaluated per device, once per `apply`/`uninstall`/`diff`/`modules`
+invocation -- every property is fetched in a single `adb shell getprop`
+round trip (not one per property, not one per `if:`-gated entry) and reused
+for every conditional entry in that run. A config with no `if:` anywhere
+(every config that predates this feature) pays no cost for this at all: no
+extra adb call, no rewritten copy, nothing.
+
 ## Shell completion
 
 A zsh completion function is at

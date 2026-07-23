@@ -1,0 +1,4 @@
+device: test
+apps:
+  - name: "Plain"
+    pkg: com.example.plain

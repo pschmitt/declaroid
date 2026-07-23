@@ -291,6 +291,9 @@ ${C_BOLD}Config schema:${C_RESET}
       enabled: false                                # optional; informational only for now
                                                       # (declaroid never enables/disables a module,
                                                       # only installs it if missing -- see below)
+      if: <condition>                                # optional; see apps' if: below -- same syntax,
+                                                       # same effect (entry doesn't exist for a
+                                                       # device its condition doesn't match)
   apps:
     - name: <display name>
       pkg: <package id>
@@ -334,6 +337,23 @@ ${C_BOLD}Config schema:${C_RESET}
                                        # install". Flipping it back to
                                        # false/unset re-enables it (pm enable)
                                        # on the next apply.
+      if: <condition>                # optional (apply/uninstall/diff/modules only);
+                                       # a device this doesn't match makes the whole
+                                       # entry behave as if it weren't in the config
+                                       # at all, for this device only -- not installed,
+                                       # not uninstalled, and (--enforce/--full) counted
+                                       # as "extra" if present anyway. A <condition> is
+                                       # a map of getprop name -> exact expected value
+                                       # (e.g. ro.product.device: redfin); multiple keys
+                                       # AND together. Two special keys: \`not:\` (negates
+                                       # its own nested <condition>) and \`or:\` (true if
+                                       # any <condition> in its list is true) -- both may
+                                       # nest arbitrarily and may sit alongside plain
+                                       # getprop keys in the same map (still ANDed with
+                                       # them). Evaluated once per device via a single
+                                       # \`getprop\` (no args) round trip, cached for every
+                                       # if:-gated entry in the same run -- configs with
+                                       # no if: anywhere pay no cost for this at all.
   obtainium:                                   # optional; repos for the Obtainium app itself
                                                  # to track (apply only; root not required, but
                                                  # used when available -- see below)
@@ -606,6 +626,135 @@ dedupe_matched_devices() {
       printf '%s\n' "$c"
     fi
   done
+}
+
+# True (rc 0) if $config has at least one apps:/modules: entry with a
+# non-empty `if:` block -- lets every caller skip device_props_json's adb
+# round trip and filter_config_for_device's whole rewrite entirely for a
+# config that doesn't use if: at all (every config that predates this
+# feature, and the common case even after it exists).
+config_has_conditions() {
+  local config="$1"
+  local n
+  n="$(yq -r '[((.apps // [])[], (.modules // [])[]) | select(has("if"))] | length' "$config")"
+  [[ "$n" -gt 0 ]]
+}
+
+# Runs `adb -s $device shell getprop` once and returns every property as a
+# single JSON object ({"key": "value", ...}) -- getprop's own output is one
+# `[key]: [value]` line per property. This is the single source of truth
+# condition_matches evaluates `if:` blocks against, so a config with many
+# if:-gated apps/modules costs exactly one adb round trip per device, never
+# one per property per entry. Prints `{}` (matches nothing) rather than
+# failing outright if adb/getprop itself errors -- an app/module gated on
+# any real condition just won't match, which is the same outcome an
+# offline/misbehaving device should have anyway.
+device_props_json() {
+  local device="$1"
+  local out
+
+  # $out captured first, decided after -- jq alone already produces a
+  # valid "{}" for empty/no input (nothing to split), so piping straight
+  # into `... || printf '{}\n'` double-prints: pipefail (set at the top of
+  # this script) still flags the pipeline as failed whenever adb itself
+  # exits non-zero (e.g. the device dropped mid-command) even though jq's
+  # own stage produced perfectly valid output for what little/nothing it
+  # received, so both jq's "{}" and the `||` fallback's "{}" would land on
+  # stdout -- confirmed by reproducing it with a mocked failing adb.
+  out="$(adb -s "$device" shell getprop </dev/null 2>/dev/null \
+    | tr -d '\r' \
+    | jq -R -s '
+        [split("\n")[] | select(length > 0) | capture("^\\[(?<key>[^]]*)\\]: \\[(?<value>.*)\\]$")? // empty]
+        | from_entries
+      ' 2>/dev/null)" || true
+
+  if [[ -n "$out" ]]
+  then
+    printf '%s\n' "$out"
+  else
+    printf '{}\n'
+  fi
+}
+
+# Recursively evaluates an app/module's `if:` block (or {}/absent, which
+# always matches -- nothing to require) against $props_json (see
+# device_props_json). Every key in a condition map is ANDed together;
+# `not` negates its own nested condition, `or` is true if any condition in
+# its list is true, and every other key is compared against that getprop
+# name for an exact string match. `not`/`or` may themselves be nested
+# arbitrarily deep, and may appear alongside plain getprop keys in the same
+# map (still ANDed with them) -- e.g. `{a: x, not: {b: y}}` means `a == x
+# AND NOT (b == y)`.
+condition_matches() {
+  local cond_json="$1"
+  local props_json="$2"
+
+  jq -e -n --argjson cond "$cond_json" --argjson props "$props_json" '
+    def matches(cond):
+      cond | to_entries | all(
+        .key as $k | .value as $v |
+        if $k == "not" then (matches($v) | not)
+        elif $k == "or" then ($v | any(.[]; matches(.)))
+        else ($props[$k] == $v)
+        end
+      );
+    matches($cond)
+  ' >/dev/null 2>&1
+}
+
+# Returns a config path with every apps:/modules: entry whose `if:` block
+# doesn't match $device (see condition_matches) removed entirely. To every
+# downstream consumer (build_install_plan/for_each_app/build_removal_plan/
+# build_module_plan/for_each_module/enforce_config/sync_obtainium_repos/
+# app_rows/list_extra_pkgs/...), a filtered-out entry simply isn't in the
+# config for this device at all -- not installed, not uninstalled, and (for
+# --enforce/--full) counted as "extra"/unconfigured if it happens to be
+# present anyway, exactly as if the config never mentioned it for this
+# device. Prints $config unchanged -- no copy, no adb call -- if it has no
+# if: anywhere (config_has_conditions), so this is a complete no-op for
+# every config that doesn't use the feature.
+filter_config_for_device() {
+  local config="$1"
+  local device="$2"
+
+  if ! config_has_conditions "$config"
+  then
+    printf '%s\n' "$config"
+    return 0
+  fi
+
+  local props
+  props="$(device_props_json "$device")"
+
+  local filtered
+  filtered="$(mktemp --suffix=.yaml)"
+  cp "$config" "$filtered"
+
+  # Same matches() logic as condition_matches, inlined rather than shelled
+  # out to per entry -- one jq call filtering the whole array is a single
+  # process per key (apps/modules) per device, not N condition_matches
+  # subprocess calls for N entries.
+  local key filtered_json
+  for key in apps modules
+  do
+    filtered_json="$(mktemp --suffix=.json)"
+    yq -o=json ".$key // []" "$config" | jq --argjson props "$props" '
+      def matches(cond):
+        cond | to_entries | all(
+          .key as $k | .value as $v |
+          if $k == "not" then (matches($v) | not)
+          elif $k == "or" then ($v | any(.[]; matches(.)))
+          else ($props[$k] == $v)
+          end
+        );
+      map(select((.if // {}) | matches(.)))
+    ' > "$filtered_json"
+
+    DECLAROID_FILTERED_ARRAY="$filtered_json" yq -i ".$key = load(strenv(DECLAROID_FILTERED_ARRAY))" "$filtered"
+    rm -f "$filtered_json"
+  done
+
+  printf '%s\n' "$filtered"
 }
 
 resolve_devices() {
@@ -2531,16 +2680,29 @@ cmd_apply() {
   [[ "$(yq -r '.obtainium_auto_track == true' "$config")" == true ]] && obtainium_needed=1
   [[ "$(yq -r '[.apps[] | select(.obtainium == true)] | length > 0' "$config")" == true ]] && obtainium_needed=1
   [[ -n "$obtainium_needed" ]] && check_deps jq
+  config_has_conditions "$config" && check_deps jq
 
   local DEVICE_SERIAL TARGET_USER ROOT_FRAMEWORK overall_rc=0
   local -a PLAN_PENDING MODULE_PLAN_PENDING REMOVAL_PLAN_PENDING
   local PLAN_SKIP_COUNT MODULE_PLAN_SKIP_COUNT MODULES_INSTALLED_COUNT=0
+  local device_config
   for DEVICE_SERIAL in "${devices[@]}"
   do
     log_step "Target device: $DEVICE_SERIAL"
     TARGET_USER="$(resolve_target_user "$DEVICE_SERIAL")"
 
-    build_install_plan "$config"
+    # Shadows $config with a copy that's had every apps:/modules: entry
+    # whose `if:` doesn't match this device dropped entirely (see
+    # filter_config_for_device) -- every call below this point uses
+    # $device_config, never $config, so an if:-filtered-out entry behaves
+    # exactly as if it were never in the config at all for this device.
+    if ! device_config="$(filter_config_for_device "$config" "$DEVICE_SERIAL")"
+    then
+      overall_rc=1
+      continue
+    fi
+
+    build_install_plan "$device_config"
 
     local proceed=1
     if [[ ${#PLAN_PENDING[@]} -eq 0 ]]
@@ -2569,12 +2731,12 @@ cmd_apply() {
     # comment) for every already-installed app, not just newly-installed
     # ones, so this must run even when PLAN_PENDING is empty (nothing left
     # to *install*, but there may still be an enable/disable to converge).
-    if [[ -n "$proceed" ]] && ! for_each_app "$config" install_app
+    if [[ -n "$proceed" ]] && ! for_each_app "$device_config" install_app
     then
       overall_rc=1
     fi
 
-    build_removal_plan "$config"
+    build_removal_plan "$device_config"
 
     if [[ ${#REMOVAL_PLAN_PENDING[@]} -gt 0 ]]
     then
@@ -2612,11 +2774,11 @@ cmd_apply() {
 
     if [[ ${#configured_module_ids[@]} -gt 0 ]]
     then
-      if ! ROOT_FRAMEWORK="$(resolve_root_framework "$config" "$cli_root_framework" "$DEVICE_SERIAL")"
+      if ! ROOT_FRAMEWORK="$(resolve_root_framework "$device_config" "$cli_root_framework" "$DEVICE_SERIAL")"
       then
         log_ok "Root not enabled/detected on $DEVICE_SERIAL, skipping configured module(s)"
       else
-        build_module_plan "$config"
+        build_module_plan "$device_config"
 
         if [[ ${#MODULE_PLAN_PENDING[@]} -eq 0 ]]
         then
@@ -2639,7 +2801,7 @@ cmd_apply() {
             esac
           fi
 
-          if [[ -n "$module_proceed" ]] && ! for_each_module "$config" install_module_app
+          if [[ -n "$module_proceed" ]] && ! for_each_module "$device_config" install_module_app
           then
             overall_rc=1
           fi
@@ -2647,15 +2809,17 @@ cmd_apply() {
       fi
     fi
 
-    if [[ -n "$obtainium_needed" ]] && ! sync_obtainium_repos "$config" "$DEVICE_SERIAL" "$cli_root_framework"
+    if [[ -n "$obtainium_needed" ]] && ! sync_obtainium_repos "$device_config" "$DEVICE_SERIAL" "$cli_root_framework"
     then
       overall_rc=1
     fi
 
-    if [[ -n "$enforce" ]] && ! enforce_config "$config" "$DEVICE_SERIAL" "$DRY_RUN" "$assume_yes"
+    if [[ -n "$enforce" ]] && ! enforce_config "$device_config" "$DEVICE_SERIAL" "$DRY_RUN" "$assume_yes"
     then
       overall_rc=1
     fi
+
+    [[ "$device_config" != "$config" ]] && rm -f "$device_config"
   done
 
   if [[ "$MODULES_INSTALLED_COUNT" -gt 0 ]]
@@ -2822,6 +2986,7 @@ cmd_uninstall() {
   # shellcheck disable=SC2064
   [[ "$resolved_config" != "$config" ]] && trap "rm -f '$resolved_config'" EXIT
   config="$resolved_config"
+  config_has_conditions "$config" && check_deps jq
 
   local devices_raw
   if ! devices_raw="$(resolve_devices "$cli_device" "$config" "$bulk")"
@@ -2852,14 +3017,23 @@ cmd_uninstall() {
     esac
   fi
 
-  local DEVICE_SERIAL overall_rc=0
+  local DEVICE_SERIAL overall_rc=0 device_config
   for DEVICE_SERIAL in "${devices[@]}"
   do
     log_step "Target device: $DEVICE_SERIAL"
-    if ! for_each_app "$config" uninstall_app
+
+    if ! device_config="$(filter_config_for_device "$config" "$DEVICE_SERIAL")"
+    then
+      overall_rc=1
+      continue
+    fi
+
+    if ! for_each_app "$device_config" uninstall_app
     then
       overall_rc=1
     fi
+
+    [[ "$device_config" != "$config" ]] && rm -f "$device_config"
   done
 
   maybe_run_adb_stop_cmd "$config" "$DRY_RUN"
@@ -3993,6 +4167,7 @@ cmd_diff() {
   # shellcheck disable=SC2064
   [[ "$resolved_config" != "$config" ]] && trap "rm -f '$resolved_config'" EXIT
   config="$resolved_config"
+  config_has_conditions "$config" && check_deps jq
 
   local devices_raw
   if ! devices_raw="$(resolve_devices "$cli_device" "$config" "$bulk")"
@@ -4003,10 +4178,15 @@ cmd_diff() {
   local -a devices
   mapfile -t devices <<< "$devices_raw"
 
-  local DEVICE_SERIAL CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE CURRENT_URL CURRENT_STATE_INSTALLED CURRENT_STATE_DISABLED
+  local DEVICE_SERIAL CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE CURRENT_URL CURRENT_STATE_INSTALLED CURRENT_STATE_DISABLED device_config
   for DEVICE_SERIAL in "${devices[@]}"
   do
     log_step "Target device: $DEVICE_SERIAL"
+
+    if ! device_config="$(filter_config_for_device "$config" "$DEVICE_SERIAL")"
+    then
+      continue
+    fi
 
     {
       printf 'NAME\tPKG\tSTORE\tSTATUS\n'
@@ -4033,12 +4213,12 @@ cmd_diff() {
           else
             printf '%s\t%s\t%s\tinstalled\n' "$CURRENT_NAME" "$CURRENT_PKG" "$CURRENT_STORE"
           fi
-        done 3< <(app_rows "$config")
+        done 3< <(app_rows "$device_config")
 
         if [[ -n "$full" ]]
         then
           local -a extra_pkgs
-          mapfile -t extra_pkgs < <(list_extra_pkgs "$config" "$DEVICE_SERIAL")
+          mapfile -t extra_pkgs < <(list_extra_pkgs "$device_config" "$DEVICE_SERIAL")
 
           local extra_pkg
           for extra_pkg in "${extra_pkgs[@]}"
@@ -4048,6 +4228,8 @@ cmd_diff() {
         fi
       } | sort -t $'\t' -k"${sort_field},${sort_field}" -f
     } | render_table | colorize_word installed "$C_GREEN" | colorize_word missing "$C_YELLOW" | colorize_word extra "$C_RED" | colorize_word disabled "$C_CYAN" | colorize_word unwanted "$C_RED" | colorize_word removed "$C_GREEN"
+
+    [[ "$device_config" != "$config" ]] && rm -f "$device_config"
   done
 
   maybe_run_adb_stop_cmd "$config" "$DRY_RUN"
@@ -4162,19 +4344,25 @@ cmd_modules() {
   local -a devices
   mapfile -t devices <<< "$devices_raw"
 
+  local DEVICE_SERIAL framework device_config
   local -a configured_rows
-  mapfile -t configured_rows < <(yq -r '(.modules // [])[] | [.id, (.name // .id)] | join("'"$ROW_SEP"'")' "$config")
-
-  local DEVICE_SERIAL framework
   for DEVICE_SERIAL in "${devices[@]}"
   do
     log_step "Target device: $DEVICE_SERIAL"
 
-    if ! framework="$(resolve_root_framework "$config" "$cli_framework" "$DEVICE_SERIAL")"
+    if ! device_config="$(filter_config_for_device "$config" "$DEVICE_SERIAL")"
     then
-      log_ok "Root not enabled/detected on $DEVICE_SERIAL"
       continue
     fi
+
+    if ! framework="$(resolve_root_framework "$device_config" "$cli_framework" "$DEVICE_SERIAL")"
+    then
+      log_ok "Root not enabled/detected on $DEVICE_SERIAL"
+      [[ "$device_config" != "$config" ]] && rm -f "$device_config"
+      continue
+    fi
+
+    mapfile -t configured_rows < <(yq -r '(.modules // [])[] | [.id, (.name // .id)] | join("'"$ROW_SEP"'")' "$device_config")
 
     local -a device_rows
     mapfile -t device_rows < <(list_root_modules "$DEVICE_SERIAL" "$framework")
@@ -4219,6 +4407,8 @@ cmd_modules() {
         fi
       } | sort -t $'\t' -k1,1 -f
     } | render_table | colorize_word installed "$C_GREEN" | colorize_word missing "$C_YELLOW" | colorize_word extra "$C_RED"
+
+    [[ "$device_config" != "$config" ]] && rm -f "$device_config"
   done
 
   maybe_run_adb_stop_cmd "$config" "$DRY_RUN"

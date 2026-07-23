@@ -1100,6 +1100,80 @@ incomplete change, not a follow-up.
   `reactivecircus/android-emulator-runner`'s own recommended pattern --
   without it, every single run pays the emulator's full cold boot time.
 
+- **`if:` (per-device conditions on an apps:/modules: entry, gated on live
+  `getprop` values) is evaluated once per device, per invocation, not once
+  per entry** -- `device_props_json` runs exactly one `adb shell getprop`
+  (no args, dumps every property) per device, parsed into one JSON object;
+  `condition_matches`/`filter_config_for_device` then evaluate every
+  `if:`-gated entry against that same cached object. `config_has_conditions`
+  gates the whole mechanism -- a config with no `if:` anywhere (every
+  config that predates this feature) never triggers a `getprop` call or a
+  rewritten copy at all, verified via the "no adb call" bats test (no `adb`
+  mock defined at all; the real binary isn't on the test's `$PATH`, so the
+  test would fail/hang if `filter_config_for_device` ever shelled out to it
+  on this path).
+  A filtered-out entry is removed from the device's own copy of the config
+  entirely (`filter_config_for_device`, via a `yq -o=json | jq | load()`
+  round trip -- same env-var-scoped-temp-file idiom as `resolve_config`'s
+  merge step), so it behaves as if it were never in the config for that
+  device to *every* downstream consumer (`build_install_plan`/
+  `for_each_app`/`build_removal_plan`/`build_module_plan`/`for_each_module`/
+  `enforce_config`/`sync_obtainium_repos`/`app_rows`/`list_extra_pkgs`)
+  without any of them needing to know `if:` exists -- the alternative
+  (threading `if:` awareness through every one of those) would have meant
+  touching far more call sites for the same result.
+  `cmd_apply`/`cmd_uninstall`/`cmd_diff`/`cmd_modules` each shadow their own
+  `config` with a per-device `device_config` at the top of their device
+  loop (right after `DEVICE_SERIAL` is set, since `if:` needs a real
+  device, unlike `resolve_config`'s import/dedup merge which runs before
+  any device is even resolved) and use `device_config` for every call for
+  the rest of that iteration, cleaning it up at the end if it's a real temp
+  file (i.e. `filter_config_for_device` didn't just hand back `$config`
+  unchanged). `cmd_modules` specifically had to move its `configured_rows`
+  extraction *inside* the loop -- it was computed once before the loop,
+  which was fine before `if:` could make the effective module list differ
+  per device.
+  Condition evaluation itself (`condition_matches`) is a small recursive
+  `jq` program, not bash: a condition map's keys AND together; `not`
+  negates its nested condition, `or` is true if any condition in its list
+  is true, everything else is compared against that getprop name for an
+  exact string match. `filter_config_for_device` inlines the identical jq
+  logic into one batched `map(select(...))` over the whole apps:/modules:
+  array per key, rather than shelling out to `condition_matches` once per
+  entry -- a real, deliberate duplication of ~6 lines of jq, chosen because
+  one jq process per array beats N one-shot jq processes for N entries.
+  **`from_entries` on this jq install (1.8.2) does not accept `k`/`v` as
+  shorthand for `key`/`value`, despite that being how jq's own docs and
+  several other jq versions describe it** -- `device_props_json`'s
+  `capture(...)` originally used named groups `k`/`v`, which silently blew
+  up `from_entries` with "Cannot use null (null) as object key" on any real
+  multi-line getprop output (reproduced directly: `[{"k":"a","v":"b"}] |
+  from_entries` errors on this jq, a hand-written `{(.key // .k // ...): ...}`
+  works around it, but simplest fix was just naming the groups `key`/
+  `value` outright). Don't assume `k`/`v` shorthand works without checking
+  the actual jq version in use.
+  **A second real bug, also only caught by writing the actual failure-mode
+  test (`adb`/`getprop` itself failing), not by inspection**: piping
+  straight into `... | jq ... || printf '{}\n'` double-prints `{}` when
+  `adb` exits non-zero but `jq` still receives (and correctly handles)
+  empty input -- `set -o pipefail` (set at the top of this script) flags
+  the *pipeline* as failed because of `adb`'s own exit code even though
+  `jq`'s stage produced perfectly valid output for what little it got, so
+  both jq's own `{}` and the `||` fallback's `{}` land on stdout. Fixed by
+  capturing the pipeline's output into a variable first (with its own
+  `|| true` to survive `set -e`) and deciding what to print from that,
+  rather than chaining `||` directly off the pipeline's own exit status.
+  **Getting the getprop-key/condition value schema right required checking
+  a real distinguishing property against real hardware, not guessing**:
+  `ro.product.device` (also mirrored by `ro.build.product`) returns
+  `redfin` on px5 (Pixel 5) and `clover` on mp4 (Mi Pad 4) -- confirmed via
+  `adb shell getprop` against both live devices before writing the actual
+  `imports/root.yaml` APatch/Magisk example that motivated this feature in
+  the first place (APatch works on px5, fails to patch mp4's boot.img at
+  all -- kernel probably compiled without KALLSYMS -- so mp4 needs Magisk
+  instead, previously handled by two separate, un-DRY per-device `apps:`
+  entries rather than one shared conditional one).
+
 ## Nix packaging
 
 - `pkgs/declaroid/default.nix` wraps the script with `makeWrapper`, prefixing
