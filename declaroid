@@ -28,6 +28,16 @@ ROW_SEP=$'\x1f'
 # loaded, or when a config has no `profiles:` section at all.
 declare -A PROFILE_ALIASES=()
 
+# Set by cmd_apply the first time it refreshes each repo index, so a
+# meta-config's `configs:` fan-out (run_meta_config calling cmd_apply once
+# per leaf config, in-process, not a fresh declaroid invocation per leaf --
+# see run_meta_config) refreshes each index at most once per declaroid
+# run instead of once per leaf. Every leaf still resolves its own
+# device/apps/root/etc independently; only this network round-trip is
+# deduplicated across them.
+FDROID_INDEX_UPDATED=""
+IZZYONDROID_INDEX_UPDATED=""
+
 # Computed once, here, at the top level -- not re-checked inside hyperlink()
 # itself. `-t 1` tests file descriptor 1 of *whatever process is currently
 # running*; once hyperlink() is called from inside a `$(...)` command
@@ -2629,16 +2639,24 @@ cmd_apply() {
   if printf '%s\n' "${stores[@]}" | grep -qx fdroid
   then
     check_deps fdroidcl
-    log_step "Updating F-Droid index"
-    fdroidcl update
+    if [[ -z "$FDROID_INDEX_UPDATED" ]]
+    then
+      log_step "Updating F-Droid index"
+      fdroidcl update
+      FDROID_INDEX_UPDATED=1
+    fi
   fi
 
   if printf '%s\n' "${stores[@]}" | grep -qx izzyondroid
   then
     check_deps fdroidcl
     ensure_izzyondroid_repo
-    log_step "Updating IzzyOnDroid index"
-    izzyondroid_fdroidcl update
+    if [[ -z "$IZZYONDROID_INDEX_UPDATED" ]]
+    then
+      log_step "Updating IzzyOnDroid index"
+      izzyondroid_fdroidcl update
+      IZZYONDROID_INDEX_UPDATED=1
+    fi
   fi
 
   if printf '%s\n' "${stores[@]}" | grep -qx github

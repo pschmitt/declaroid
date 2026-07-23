@@ -350,6 +350,11 @@ runs, and the command's own exit status reflects whether *any* of them
 failed, mirroring how `--bulk` already keeps going across multiple matched
 devices within a single config rather than aborting on the first one.
 
+`apply`'s F-Droid/IzzyOnDroid index refresh happens at most once per
+invocation, not once per leaf -- even if several leaves configure `store:
+fdroid`/`store: izzyondroid` apps, only the first one triggers `fdroidcl
+update`/the IzzyOnDroid equivalent; the rest reuse that same refresh.
+
 ### Device matching
 
 Declaroid resolves a target device in this order: `--device`,
