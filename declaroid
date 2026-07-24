@@ -2259,6 +2259,65 @@ resolve_config() {
   printf '%s\n' "$resolved"
 }
 
+# Shared by cmd_apply/cmd_uninstall/cmd_diff/cmd_modules: each of those used
+# to carry its own copy of this exact ~15-20 line preamble (config-file-
+# exists check, is_meta_config dispatch to run_meta_config, resolve_config +
+# register_resolved_config_cleanup) -- the single biggest duplication in
+# this file, per AGENTS.md, since a future change to meta-config dispatch or
+# the resolve_config/cleanup handling had to be made correctly in 4 separate
+# places by hand. Extracted here, next to resolve_config/
+# register_resolved_config_cleanup, since it's conceptually part of the same
+# "resolve a leaf config" story.
+#
+# Deliberately NOT meant to be called via command substitution
+# (`x="$(resolve_or_dispatch_config ...)"`) -- that forks a subshell, and
+# RESOLVE_CONFIG_META_HANDLED/RESOLVE_CONFIG_META_RC/RESOLVED_CONFIG_RESULT
+# below (plain globals, not local to this function) would never reach the
+# caller once the subshell exits. Call this as a plain statement instead,
+# then read these three globals: RESOLVE_CONFIG_META_HANDLED set means the
+# meta-config path already ran $fn_name once per leaf via run_meta_config
+# and the caller should just `return "$RESOLVE_CONFIG_META_RC"`; otherwise
+# RESOLVED_CONFIG_RESULT holds the resolved config path to assign back to
+# the caller's own `config`.
+RESOLVE_CONFIG_META_HANDLED=""
+RESOLVE_CONFIG_META_RC=0
+RESOLVED_CONFIG_RESULT=""
+
+resolve_or_dispatch_config() {
+  local fn_name="$1"
+  local config="$2"
+  shift 2
+  local -a orig_args=("$@")
+
+  RESOLVE_CONFIG_META_HANDLED=""
+  RESOLVE_CONFIG_META_RC=0
+  RESOLVED_CONFIG_RESULT=""
+
+  if [[ ! -f "$config" ]]
+  then
+    log_error "Config file not found: $config"
+    return 2
+  fi
+
+  if is_meta_config "$config"
+  then
+    run_meta_config "$fn_name" "$config" "${orig_args[@]}"
+    RESOLVE_CONFIG_META_RC=$?
+    RESOLVE_CONFIG_META_HANDLED=1
+    return 0
+  fi
+
+  local resolved_config
+  if ! resolved_config="$(resolve_config "$config")"
+  then
+    return 2
+  fi
+  # See register_resolved_config_cleanup for why this isn't a direct
+  # `trap "rm -f '$resolved_config'" EXIT` here anymore.
+  [[ "$resolved_config" != "$config" ]] && register_resolved_config_cleanup "$resolved_config"
+  RESOLVED_CONFIG_RESULT="$resolved_config"
+}
+
 # Recursively expands a *meta-config*'s `configs:` list (paths relative to
 # the meta-config's own directory, same convention as imports:) into real,
 # on-disk leaf config paths -- printed one per line, in listed order,
@@ -2666,27 +2725,15 @@ cmd_apply() {
 
   check_deps adb yq sha256sum
 
-  if [[ ! -f "$config" ]]
-  then
-    log_error "Config file not found: $config"
-    return 2
-  fi
-
-  if is_meta_config "$config"
-  then
-    run_meta_config cmd_apply "$config" "${orig_args[@]}"
-    return $?
-  fi
-
-  local resolved_config
-  if ! resolved_config="$(resolve_config "$config")"
+  if ! resolve_or_dispatch_config cmd_apply "$config" "${orig_args[@]}"
   then
     return 2
   fi
-  # See register_resolved_config_cleanup for why this isn't a direct
-  # `trap "rm -f '$resolved_config'" EXIT` here anymore.
-  [[ "$resolved_config" != "$config" ]] && register_resolved_config_cleanup "$resolved_config"
-  config="$resolved_config"
+  if [[ -n "$RESOLVE_CONFIG_META_HANDLED" ]]
+  then
+    return "$RESOLVE_CONFIG_META_RC"
+  fi
+  config="$RESOLVED_CONFIG_RESULT"
 
   # `enforce: true` in the config is equivalent to always passing
   # --enforce -- an explicit `== true` comparison, not `//`, since the
@@ -3092,27 +3139,15 @@ cmd_uninstall() {
 
   check_deps adb yq
 
-  if [[ ! -f "$config" ]]
-  then
-    log_error "Config file not found: $config"
-    return 2
-  fi
-
-  if is_meta_config "$config"
-  then
-    run_meta_config cmd_uninstall "$config" "${orig_args[@]}"
-    return $?
-  fi
-
-  local resolved_config
-  if ! resolved_config="$(resolve_config "$config")"
+  if ! resolve_or_dispatch_config cmd_uninstall "$config" "${orig_args[@]}"
   then
     return 2
   fi
-  # See register_resolved_config_cleanup for why this isn't a direct
-  # `trap "rm -f '$resolved_config'" EXIT` here anymore.
-  [[ "$resolved_config" != "$config" ]] && register_resolved_config_cleanup "$resolved_config"
-  config="$resolved_config"
+  if [[ -n "$RESOLVE_CONFIG_META_HANDLED" ]]
+  then
+    return "$RESOLVE_CONFIG_META_RC"
+  fi
+  config="$RESOLVED_CONFIG_RESULT"
   config_has_conditions "$config" && check_deps jq
 
   local devices_raw
@@ -4316,27 +4351,15 @@ cmd_diff() {
 
   check_deps adb yq
 
-  if [[ ! -f "$config" ]]
-  then
-    log_error "Config file not found: $config"
-    return 2
-  fi
-
-  if is_meta_config "$config"
-  then
-    run_meta_config cmd_diff "$config" "${orig_args[@]}"
-    return $?
-  fi
-
-  local resolved_config
-  if ! resolved_config="$(resolve_config "$config")"
+  if ! resolve_or_dispatch_config cmd_diff "$config" "${orig_args[@]}"
   then
     return 2
   fi
-  # See register_resolved_config_cleanup for why this isn't a direct
-  # `trap "rm -f '$resolved_config'" EXIT` here anymore.
-  [[ "$resolved_config" != "$config" ]] && register_resolved_config_cleanup "$resolved_config"
-  config="$resolved_config"
+  if [[ -n "$RESOLVE_CONFIG_META_HANDLED" ]]
+  then
+    return "$RESOLVE_CONFIG_META_RC"
+  fi
+  config="$RESOLVED_CONFIG_RESULT"
   config_has_conditions "$config" && check_deps jq
 
   local devices_raw
@@ -4479,27 +4502,15 @@ cmd_modules() {
 
   check_deps adb yq jq
 
-  if [[ ! -f "$config" ]]
-  then
-    log_error "Config file not found: $config"
-    return 2
-  fi
-
-  if is_meta_config "$config"
-  then
-    run_meta_config cmd_modules "$config" "${orig_args[@]}"
-    return $?
-  fi
-
-  local resolved_config
-  if ! resolved_config="$(resolve_config "$config")"
+  if ! resolve_or_dispatch_config cmd_modules "$config" "${orig_args[@]}"
   then
     return 2
   fi
-  # See register_resolved_config_cleanup for why this isn't a direct
-  # `trap "rm -f '$resolved_config'" EXIT` here anymore.
-  [[ "$resolved_config" != "$config" ]] && register_resolved_config_cleanup "$resolved_config"
-  config="$resolved_config"
+  if [[ -n "$RESOLVE_CONFIG_META_HANDLED" ]]
+  then
+    return "$RESOLVE_CONFIG_META_RC"
+  fi
+  config="$RESOLVED_CONFIG_RESULT"
 
   local devices_raw
   if ! devices_raw="$(resolve_devices "$cli_device" "$config" "$bulk")"
