@@ -36,6 +36,8 @@
         };
       });
 
+      homeManagerModules.default = import ./nix/home-manager-module.nix { inherit self; };
+
       formatter = forAllSystems (system: nixpkgs.legacyPackages.${system}.nixfmt);
 
       # `nix flake check` builds these: shellcheck + `bash -n` against the

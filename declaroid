@@ -2411,6 +2411,21 @@ resolve_or_dispatch_config() {
     return 0
   fi
 
+  # Announce the config file in play before anything else runs -- this is
+  # the *only* place a single (non-meta) leaf ever gets resolved from, so
+  # it's the one spot that can reliably say so. Without it, a config that
+  # silently falls back to a different file than the caller expected (e.g.
+  # DECLAROID_CONFIG not being set in the calling shell, quietly falling
+  # back to DEFAULT_CONFIG) gives no visible clue before --enforce starts
+  # listing "unconfigured" apps for uninstall -- confirmed as a real
+  # incident: a plain `declaroid apply --all-devices --enforce` run over
+  # SSH (no DECLAROID_CONFIG in that shell) silently fell back to the tiny
+  # shared apps.yaml baseline instead of the intended all.yaml meta-config,
+  # and --enforce offered to uninstall every real app on both devices as
+  # a result. Same banner format run_meta_config already prints per leaf,
+  # so this replaces that duplicate call there instead of stacking both.
+  log_step "=== Config: $config ==="
+
   local resolved_config
   if ! resolved_config="$(resolve_config "$config")"
   then
@@ -2565,10 +2580,12 @@ run_meta_config() {
   local -a filtered_args
   mapfile -t filtered_args < <(strip_config_flag "${orig_args[@]}")
 
+  # Each leaf's own resolve_or_dispatch_config call prints the "=== Config:
+  # $leaf ===" banner itself (see its comment) -- no need to duplicate it
+  # here.
   local leaf overall_rc=0
   for leaf in "${leaf_configs[@]}"
   do
-    log_step "=== Config: $leaf ==="
     if ! "$fn" -c "$leaf" "${filtered_args[@]}"
     then
       overall_rc=1

@@ -94,6 +94,34 @@ Or add it as a flake input and use `packages.<system>.declaroid` /
 The flake also exposes `packages.<system>.gplaydl` on its own, in case you
 just want that.
 
+### Home Manager module
+
+The flake also exposes `homeManagerModules.default`, which installs the
+package and (optionally) manages
+`${XDG_CONFIG_HOME:-$HOME/.config}/declaroid/apps.yaml` for you:
+
+```nix
+{
+  imports = [ declaroid.homeManagerModules.default ];
+
+  programs.declaroid = {
+    enable = true;
+    # Out-of-store symlink, not a Nix-store copy -- see configPath's own
+    # description for why (meta-configs' configs: entries need real
+    # sibling files on disk).
+    configPath = "${config.home.homeDirectory}/dotfiles/android/all.yaml";
+  };
+}
+```
+
+Setting `configPath` is optional but recommended over relying on
+`$DECLAROID_CONFIG` alone: a shell whose environment predates that
+variable being set (a long-lived tmux pane, a stale SSH session) never
+re-sources it and silently falls back to whatever's already at the default
+path -- which `apply --enforce` can then read as "nothing is configured"
+and offer to uninstall everything. Managing the path itself makes it
+correct everywhere, with no session-variable sourcing involved.
+
 ### Manually
 
 `declaroid` is a single bash script with no build step. Its runtime
