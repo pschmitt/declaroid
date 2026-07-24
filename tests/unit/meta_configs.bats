@@ -30,6 +30,20 @@ setup() {
   [[ "${lines[0]}" == *leaf_a.yaml ]]
 }
 
+@test "expand_meta_configs: configs: resolves against a symlink's target directory, not the symlink's own" {
+  # Same regression as resolve_config's identical test: a Home Manager
+  # mkOutOfStoreSymlink pointing a meta-config at a live checkout elsewhere
+  # must still find leaf_a.yaml/leaf_b.yaml next to the *real* file, not
+  # next to wherever the symlink itself happens to sit.
+  local link="$BATS_TEST_TMPDIR/all.yaml"
+  ln -s "$(fixture meta_configs/meta.yaml)" "$link"
+
+  run expand_meta_configs "$link"
+  [ "$status" -eq 0 ]
+  [[ "${lines[0]}" == *leaf_a.yaml ]]
+  [[ "${lines[1]}" == *leaf_b.yaml ]]
+}
+
 @test "expand_meta_configs: a real cycle is detected and rejected" {
   run expand_meta_configs "$(fixture meta_configs/meta_cycle_a.yaml)"
   [ "$status" -eq 1 ]

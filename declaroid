@@ -2211,8 +2211,17 @@ collect_imports() {
   fi
   SEEN["$real"]=1
 
+  # dirname of $real (the realpath), not the raw $config -- $config can be
+  # a symlink living in a different directory than its target (e.g. a Home
+  # Manager `mkOutOfStoreSymlink` at ~/.config/declaroid/apps.yaml pointing
+  # at a live git checkout elsewhere); imports: are meant to resolve
+  # relative to where the config data actually lives, not to wherever a
+  # symlink to it happens to sit. Confirmed as a real bug: exactly that
+  # setup made every relative imports:/configs: entry resolve against
+  # ~/.config/declaroid instead of the checkout, failing with "entry not
+  # found" for every one of them.
   local dir
-  dir="$(dirname "$config")"
+  dir="$(dirname "$real")"
 
   local -a raw_imports
   mapfile -t raw_imports < <(yq -r '(.imports // [])[]' "$config")
@@ -2473,8 +2482,11 @@ collect_meta_configs() {
     return 0
   fi
 
+  # dirname of $real, not the raw $config -- see collect_imports' identical
+  # comment on why (a symlink's own directory isn't necessarily where its
+  # sibling leaf configs actually live).
   local dir
-  dir="$(dirname "$config")"
+  dir="$(dirname "$real")"
 
   local c resolved_c
   for c in "${raw_configs[@]}"

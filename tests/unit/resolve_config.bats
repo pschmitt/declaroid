@@ -80,3 +80,22 @@ setup() {
   run yq -r '.apps[] | select(.pkg == "com.example.keep") | .name' "$resolved"
   [ "$output" = "Kept As-Is" ]
 }
+
+@test "resolve_config: imports: resolve against a symlink's target directory, not the symlink's own" {
+  # Regresses a real bug: a Home Manager mkOutOfStoreSymlink at, say,
+  # ~/.config/declaroid/apps.yaml pointing at a live git checkout elsewhere
+  # made every relative imports:/configs: entry resolve against
+  # ~/.config/declaroid instead of the checkout, failing with "entry not
+  # found" for every single one.
+  local link="$BATS_TEST_TMPDIR/apps.yaml"
+  ln -s "$(fixture resolve_config/device_inherits_scalars.yaml)" "$link"
+
+  run resolve_config "$link"
+  [ "$status" -eq 0 ]
+
+  run yq -r '.apps[].pkg' "$output"
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "com.example.base" ]
+  [ "${lines[1]}" = "com.example.shared" ]
+  [ "${lines[2]}" = "com.example.device" ]
+}
