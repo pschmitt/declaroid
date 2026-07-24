@@ -1125,24 +1125,134 @@ has_apk_files() {
   [[ -e "${existing[0]}" ]]
 }
 
+# Makes sure $cache_dir exists (needed unconditionally, even on a cache
+# hit -- see with_cache_lock, which needs somewhere to put its lock file
+# before it even knows whether a fetch is going to happen) and decides
+# whether a fetch is actually needed: $FORCE_DOWNLOAD set, or no file
+# matching $glob (e.g. '*.apk', '*.zip') already cached there. When a
+# fetch is needed, clears out any stale file(s) first so the fetch starts
+# from an empty directory, and returns 0 ("go fetch"); otherwise logs the
+# cache-hit message and returns 1 ("nothing to do").
+#
+# Replaces the identical ~5-line preamble that used to be hand-duplicated
+# across install_github, install_url, and both the github/url branches of
+# resolve_module_zip -- same shape in all four places (check cache, mkdir
+# -p + rm -f stale files if force/missing), just '*.apk' for apps vs
+# '*.zip' for modules. Only that surrounding boilerplate moved here --
+# each store's own actual fetch mechanism (fetch_github_release's GitHub
+# API calls, fetch_url_apk/fetch_url_zip's curl, ...) is untouched, called
+# separately by with_cache_lock below once this returns 0.
+ensure_download_dir() {
+  local cache_dir="$1"
+  local glob="$2"
+  local -a existing
+
+  mkdir -p "$cache_dir"
+  # $glob (e.g. '*.apk') is a deliberate glob pattern, not a plain value;
+  # word-splitting/expanding it here is the whole point (same as
+  # has_apk_files's own hardcoded '*.apk' does).
+  # shellcheck disable=SC2206
+  existing=("$cache_dir"/$glob)
+
+  if [[ -z "$FORCE_DOWNLOAD" ]] && [[ -e "${existing[0]}" ]]
+  then
+    log_step "Using cached download in $cache_dir"
+    return 1
+  fi
+
+  # Same deliberate glob-splicing as above, same reason.
+  # shellcheck disable=SC2086
+  rm -f "$cache_dir"/$glob
+  return 0
+}
+
+# Runs $fetch_fn (called as `$fetch_fn "$cache_dir"`, the same
+# single-cache_dir-argument convention fetch_github_release already used)
+# whenever ensure_download_dir (see its own comment) says a fetch is
+# actually needed, serialized per cache_dir via flock so two declaroid
+# processes -- or two devices in one --bulk apply, both installing the
+# same package/module -- never interleave on the SAME cache dir: one
+# process's --force-download rm -f deleting a file the other is mid-install
+# from, or a `find` picking up a partially-written file from a still-
+# running download. There is no locking anywhere else in this script
+# (confirmed: no other flock use at all) -- different cache dirs (distinct
+# packages/modules) are completely untouched by this and keep downloading
+# fully in parallel; only two callers racing on the literal same directory
+# ever wait on each other.
+#
+# The lock file lives at "$cache_dir/.lock", inside the cache dir rather
+# than as a "${cache_dir}.lock" sibling, deliberately: a sibling path's
+# parent (CACHE_ROOT/module_cache_dir_for's own root) may not exist yet at
+# all on a totally fresh cache, while mkdir -p "$cache_dir" right below
+# trivially guarantees a home for a lock file placed inside it instead.
+# A leading-dot filename is invisible to every existing '*.apk'/'*.zip'
+# glob and `find -iname '*.apk'`/`'*.zip'` already used throughout this
+# file (it doesn't end in .apk/.zip, so it can never be mistaken for a
+# cached download or get swept up by ensure_download_dir's own rm -f), and
+# `clear-cache`'s `rm -rf` of the whole per-package/module directory
+# removes it along with everything else with no special-casing needed.
+#
+# The whole check-cache-through-fetch-completes sequence runs inside a
+# `(...)` subshell so the flock (held via an fd opened with
+# `exec {lock_fd}>...`) is released the instant that subshell exits -- on
+# a cache hit, a successful fetch, or a failed one alike -- without
+# needing an explicit `flock -u` at every one of those exit paths.
+with_cache_lock() {
+  local cache_dir="$1"
+  local glob="$2"
+  local fetch_fn="$3"
+  local lock_file="${cache_dir}/.lock"
+
+  # mkdir -p is idempotent/race-safe on its own (concurrent callers never
+  # error each other out creating the same path), so this runs unlocked --
+  # purely to guarantee $lock_file has somewhere to live before the actual
+  # locked section below. ensure_download_dir does its own (harmless,
+  # already-exists) mkdir -p too; this one exists only for the lock file's
+  # sake, in case a fetch turns out not to even be needed.
+  mkdir -p "$cache_dir"
+
+  (
+    exec {lock_fd}>"$lock_file"
+    flock "$lock_fd"
+
+    if ensure_download_dir "$cache_dir" "$glob"
+    then
+      "$fetch_fn" "$cache_dir"
+    fi
+  )
+}
+
 fetch_app() {
   local cache_dir
   cache_dir="$(cache_dir_for "$CURRENT_PKG")"
+  local lock_file="${cache_dir}/.lock"
 
-  if [[ -z "$FORCE_DOWNLOAD" ]] && has_apk_files "$cache_dir"
-  then
-    log_step "Using cached download in $cache_dir"
-    printf '%s\n' "$cache_dir"
-    return 0
-  fi
-
+  # Locked the same way with_cache_lock is (see its own comment above) --
+  # a per-package flock via a subshell, released automatically the instant
+  # it exits, on a cache hit or a fresh fetch alike. Not routed through
+  # with_cache_lock itself: fetch_app's shape genuinely differs from
+  # install_github/install_url/resolve_module_zip's (gplaydl overwrites
+  # cache_dir's contents on its own, so there's no upfront rm -f/stale-file
+  # step here to share), so this is a direct, standalone lock rather than
+  # a call through that shared helper.
   mkdir -p "$cache_dir"
 
-  if ! gplaydl download "$CURRENT_PKG" -o "$cache_dir" >&2
-  then
-    log_error "Failed to download $CURRENT_PKG"
-    return 1
-  fi
+  (
+    exec {lock_fd}>"$lock_file"
+    flock "$lock_fd"
+
+    if [[ -z "$FORCE_DOWNLOAD" ]] && has_apk_files "$cache_dir"
+    then
+      log_step "Using cached download in $cache_dir"
+      exit 0
+    fi
+
+    if ! gplaydl download "$CURRENT_PKG" -o "$cache_dir" >&2
+    then
+      log_error "Failed to download $CURRENT_PKG"
+      exit 1
+    fi
+  ) || return 1
 
   printf '%s\n' "$cache_dir"
 }
@@ -1500,6 +1610,38 @@ fetch_github_release() {
   fi
 }
 
+# Shared tail of install_github/install_url, after with_cache_lock has made
+# sure $cache_dir holds a cached-or-freshly-fetched download: find the
+# single cached APK (erroring loudly if the cache holds zero or more than
+# one -- a misconfigured 'asset' regex matching more than one release
+# asset, or some other unexpected extra file, rather than silently
+# installing the wrong one), then adb install -r it with the same
+# --user/-g threading every other single-APK install path in this file
+# uses. No -i installer attribution here: Android silently drops it unless
+# the claimed installer is a real, currently-installed package (tested --
+# a synthetic "declaroid.store.github" id is just ignored, ending up
+# installer=null same as passing no -i at all), and there's no existing
+# installed package either store could truthfully claim to be.
+install_single_cached_apk() {
+  local cache_dir="$1"
+  local -a apks
+  mapfile -t apks < <(find "$cache_dir" -maxdepth 1 -iname '*.apk')
+
+  if [[ ${#apks[@]} -ne 1 ]]
+  then
+    log_error "Expected exactly one cached APK in $cache_dir, found ${#apks[@]}"
+    return 1
+  fi
+
+  local -a user_args=()
+  local user_val
+  user_val="$(effective_target_user)"
+  [[ -n "$user_val" ]] && user_args=(--user "$user_val")
+  local -a grant_args=()
+  [[ -n "${GRANT_PERMISSIONS:-}" ]] && grant_args=(-g)
+  adb -s "$DEVICE_SERIAL" install -r "${user_args[@]}" "${grant_args[@]}" "${apks[0]}"
+}
+
 install_github() {
   local cache_dir
   cache_dir="$(cache_dir_for "$CURRENT_PKG")"
@@ -1510,38 +1652,31 @@ install_github() {
     return 1
   fi
 
-  if [[ -n "$FORCE_DOWNLOAD" ]] || ! has_apk_files "$cache_dir"
+  if ! with_cache_lock "$cache_dir" '*.apk' fetch_github_release
   then
-    mkdir -p "$cache_dir"
-    rm -f "$cache_dir"/*.apk
-    if ! fetch_github_release "$cache_dir"
-    then
-      return 1
-    fi
-  else
-    log_step "Using cached download in $cache_dir"
-  fi
-
-  local -a apks
-  mapfile -t apks < <(find "$cache_dir" -maxdepth 1 -iname '*.apk')
-
-  if [[ ${#apks[@]} -ne 1 ]]
-  then
-    log_error "Expected exactly one cached APK in $cache_dir, found ${#apks[@]}"
     return 1
   fi
 
-  # No -i here: Android silently drops installer attribution unless the
-  # claimed installer is a real, currently-installed package (tested --
-  # a synthetic "declaroid.store.github" id is just ignored, ending up
-  # installer=null same as if we hadn't passed -i at all).
-  local -a user_args=()
-  local user_val
-  user_val="$(effective_target_user)"
-  [[ -n "$user_val" ]] && user_args=(--user "$user_val")
-  local -a grant_args=()
-  [[ -n "${GRANT_PERMISSIONS:-}" ]] && grant_args=(-g)
-  adb -s "$DEVICE_SERIAL" install -r "${user_args[@]}" "${grant_args[@]}" "${apks[0]}"
+  install_single_cached_apk "$cache_dir"
+}
+
+# store: url's actual fetch mechanic, extracted out of install_url's own
+# body only so with_cache_lock has a single-argument (cache_dir) function
+# to call, the same convention fetch_github_release already follows --
+# the curl invocation/flags themselves are unchanged from install_url's
+# previous inline version.
+fetch_url_apk() {
+  local cache_dir="$1"
+  local filename
+  filename="$(basename "$CURRENT_URL")"
+  [[ "$filename" == *.apk ]] || filename="${CURRENT_PKG}.apk"
+
+  log_step "Downloading $CURRENT_URL"
+  if ! curl --fail --silent --show-error --location --output "${cache_dir}/${filename}" "$CURRENT_URL"
+  then
+    log_error "Failed to download $CURRENT_URL"
+    return 1
+  fi
 }
 
 install_url() {
@@ -1554,43 +1689,12 @@ install_url() {
     return 1
   fi
 
-  if [[ -n "$FORCE_DOWNLOAD" ]] || ! has_apk_files "$cache_dir"
+  if ! with_cache_lock "$cache_dir" '*.apk' fetch_url_apk
   then
-    mkdir -p "$cache_dir"
-    rm -f "$cache_dir"/*.apk
-
-    local filename
-    filename="$(basename "$CURRENT_URL")"
-    [[ "$filename" == *.apk ]] || filename="${CURRENT_PKG}.apk"
-
-    log_step "Downloading $CURRENT_URL"
-    if ! curl --fail --silent --show-error --location --output "${cache_dir}/${filename}" "$CURRENT_URL"
-    then
-      log_error "Failed to download $CURRENT_URL"
-      return 1
-    fi
-  else
-    log_step "Using cached download in $cache_dir"
-  fi
-
-  local -a apks
-  mapfile -t apks < <(find "$cache_dir" -maxdepth 1 -iname '*.apk')
-
-  if [[ ${#apks[@]} -ne 1 ]]
-  then
-    log_error "Expected exactly one cached APK in $cache_dir, found ${#apks[@]}"
     return 1
   fi
 
-  # No -i: same reasoning as install_github (no real installed package to
-  # truthfully attribute this to).
-  local -a user_args=()
-  local user_val
-  user_val="$(effective_target_user)"
-  [[ -n "$user_val" ]] && user_args=(--user "$user_val")
-  local -a grant_args=()
-  [[ -n "${GRANT_PERMISSIONS:-}" ]] && grant_args=(-g)
-  adb -s "$DEVICE_SERIAL" install -r "${user_args[@]}" "${grant_args[@]}" "${apks[0]}"
+  install_single_cached_apk "$cache_dir"
 }
 
 # Module zips are cached separately from app APKs, under their own
@@ -1608,11 +1712,25 @@ module_cache_dir_for() {
   printf '%s/modules/%s\n' "$CACHE_ROOT" "$module_id"
 }
 
-has_zip_files() {
-  local dir="$1"
-  local -a existing=("$dir"/*.zip)
+# source: url (modules)'s actual fetch mechanic -- mirrors fetch_url_apk's
+# apps-side version exactly (same curl flags), just against
+# CURRENT_MODULE_URL/CURRENT_MODULE_ID and a .zip extension instead of
+# CURRENT_URL/CURRENT_PKG and .apk. Extracted out of resolve_module_zip's
+# own url branch for the same reason fetch_url_apk was extracted out of
+# install_url: with_cache_lock needs a single-argument (cache_dir)
+# function to call.
+fetch_url_zip() {
+  local cache_dir="$1"
+  local filename
+  filename="$(basename "$CURRENT_MODULE_URL")"
+  [[ "$filename" == *.zip ]] || filename="${CURRENT_MODULE_ID}.zip"
 
-  [[ -e "${existing[0]}" ]]
+  log_step "Downloading $CURRENT_MODULE_URL"
+  if ! curl --fail --silent --show-error --location --output "${cache_dir}/${filename}" "$CURRENT_MODULE_URL"
+  then
+    log_error "Failed to download $CURRENT_MODULE_URL"
+    return 1
+  fi
 }
 
 # Emits configured modules as one row per module: id, name (defaulted to
@@ -1670,12 +1788,15 @@ for_each_module() {
 
 # Resolves CURRENT_MODULE_*'s source into a single local zip file path,
 # ready to push to the device, and prints that path -- downloading/caching
-# under module_cache_dir_for for github/url (mirroring fetch_github_release/
-# install_url's own caching), or just locating the file directly for local
-# (nothing to cache, it's already on disk, same as install_local). The
-# github case reuses fetch_github_release verbatim by shadowing
-# CURRENT_REPO/CURRENT_ASSET as locals first -- that function only ever
-# reads those two (plus the cache_dir argument), so this is the same
+# under module_cache_dir_for for github/url via with_cache_lock (the same
+# shared cache-freshness-plus-locking helper install_github/install_url use
+# for apps, just '*.zip' instead of '*.apk' -- resolve_module_zip only
+# needs that part, not their adb-install tail, since modules are installed
+# differently), or just locating the file directly for local (nothing to
+# cache, it's already on disk, same as install_local). The github case
+# reuses fetch_github_release verbatim by shadowing CURRENT_REPO/
+# CURRENT_ASSET as locals first -- that function only ever reads those two
+# (plus the cache_dir argument), so this is the same
 # CURRENT_*-as-dynamic-scope convention already used throughout this file,
 # not a hack. Only ever logs to stderr (via the functions it calls) --
 # the zip path on stdout is the actual return value callers need.
@@ -1692,19 +1813,16 @@ resolve_module_zip() {
 
       cache_dir="$(module_cache_dir_for "$CURRENT_MODULE_ID")"
 
-      if [[ -n "$FORCE_DOWNLOAD" ]] || ! has_zip_files "$cache_dir"
+      # Shadowed unconditionally (not just when a fetch turns out to be
+      # needed) since with_cache_lock/ensure_download_dir decide that
+      # internally now -- harmless when unused, same
+      # CURRENT_*-as-dynamic-scope convention as before, just set one
+      # statement earlier.
+      local CURRENT_REPO="$CURRENT_MODULE_REPO"
+      local CURRENT_ASSET="$CURRENT_MODULE_ASSET"
+      if ! with_cache_lock "$cache_dir" '*.zip' fetch_github_release
       then
-        mkdir -p "$cache_dir"
-        rm -f "$cache_dir"/*.zip
-
-        local CURRENT_REPO="$CURRENT_MODULE_REPO"
-        local CURRENT_ASSET="$CURRENT_MODULE_ASSET"
-        if ! fetch_github_release "$cache_dir"
-        then
-          return 1
-        fi
-      else
-        log_step "Using cached download in $cache_dir"
+        return 1
       fi
       ;;
     url)
@@ -1716,23 +1834,9 @@ resolve_module_zip() {
 
       cache_dir="$(module_cache_dir_for "$CURRENT_MODULE_ID")"
 
-      if [[ -n "$FORCE_DOWNLOAD" ]] || ! has_zip_files "$cache_dir"
+      if ! with_cache_lock "$cache_dir" '*.zip' fetch_url_zip
       then
-        mkdir -p "$cache_dir"
-        rm -f "$cache_dir"/*.zip
-
-        local filename
-        filename="$(basename "$CURRENT_MODULE_URL")"
-        [[ "$filename" == *.zip ]] || filename="${CURRENT_MODULE_ID}.zip"
-
-        log_step "Downloading $CURRENT_MODULE_URL"
-        if ! curl --fail --silent --show-error --location --output "${cache_dir}/${filename}" "$CURRENT_MODULE_URL"
-        then
-          log_error "Failed to download $CURRENT_MODULE_URL"
-          return 1
-        fi
-      else
-        log_step "Using cached download in $cache_dir"
+        return 1
       fi
       ;;
     local)
