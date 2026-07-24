@@ -1,0 +1,9 @@
+profiles:
+  - name: personal
+    id: 0
+  - name: work
+    id: 10
+
+apps:
+  - name: A
+    pkg: com.example.a

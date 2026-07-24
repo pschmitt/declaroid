@@ -1,0 +1,11 @@
+modules:
+  - id: minimal-module
+    repo: example/minimal
+
+  - id: full-module
+    name: Full Module
+    source: local
+    repo: example/full
+    asset: '\.tar$'
+    url: "https://example.com/full.zip"
+    path: /sdcard/full.zip

@@ -1,0 +1,5 @@
+store: fdroid
+
+apps:
+  - name: "Existing App"
+    pkg: com.example.existing

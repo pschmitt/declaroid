@@ -1,0 +1,18 @@
+store: fdroid
+
+apps:
+  - name: Pending App
+    pkg: com.example.pending
+
+  - name: Already Installed App
+    pkg: com.example.installed
+
+  - name: Removal Candidate
+    pkg: com.example.remove
+    state:
+      installed: false
+
+  - name: Already Gone
+    pkg: com.example.gone
+    state:
+      installed: false

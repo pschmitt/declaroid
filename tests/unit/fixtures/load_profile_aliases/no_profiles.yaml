@@ -1,0 +1,3 @@
+apps:
+  - name: A
+    pkg: com.example.a
