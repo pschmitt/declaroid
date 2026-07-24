@@ -4,7 +4,7 @@ Declarative Android app provisioning. Define the apps you want on a device in
 a YAML file, then `declaroid apply` fetches and installs them, `declaroid
 uninstall` removes them, and already-installed apps are skipped automatically.
 
-Apps can come from five sources:
+Apps can come from six sources:
 
 - **Google Play**, via [gplaydl](https://github.com/rehmatworks/gplaydl)
   (anonymous authentication, no Google account needed)
@@ -13,6 +13,7 @@ Apps can come from five sources:
   it never mixes into a plain `store: fdroid`
 - **GitHub releases**, downloaded directly from a repo's release assets
   (à la [Obtainium](https://github.com/ImranR98/Obtainium))
+- **A direct URL**, downloaded with a plain `curl`
 - **Local APK files** already on disk
 
 ## Why
@@ -478,9 +479,10 @@ for apps (a plan first, then a confirmation prompt, skippable with
 changes only take effect on next boot for both frameworks** -- it doesn't
 reboot the device for you either, so a `WRN ... reboot the device(s) for
 changes to take effect` reminder is printed instead after any module
-install. Pass `--reboot` to turn that reminder into an actual reboot of
-the targeted device(s) once the run finishes (no-op if no module was
-installed).
+install. Pass `--reboot` to turn that reminder into an actual reboot once
+the run finishes -- only of the device(s) that actually had a module
+installed this run, not every device `--bulk`/`--all-devices` targeted
+(a no-op if none did).
 
 Config schema:
 
@@ -731,6 +733,23 @@ already-installed check and as the cache key) -- declaroid doesn't inspect
 the downloaded APK to figure this out for you, so get it from `aapt dump
 badging` or by installing once and checking `adb shell pm list packages`.
 
+#### `url`
+
+Downloads a single APK from any direct URL with a plain `curl`, no store
+metadata or authentication of any kind. Needs a `url` on the app entry:
+
+```yaml
+- name: Some App
+  pkg: com.example.app
+  store: url
+  url: https://example.com/path/to/some-app.apk
+```
+
+Like `github`, `pkg` still has to be the real Android package ID -- it's
+used for the already-installed check and as the cache key, not derived from
+the download. No split-APK support (single file only) and no `-i` installer
+attribution, same reasoning as `github`.
+
 #### `local`
 
 Installs an APK (or split APKs) already sitting on disk -- no download at
@@ -749,10 +768,10 @@ Like `gplay`, split APKs are deduped by checksum before `adb install-multiple`.
 
 ### Caching
 
-Downloads for `gplay` and `github` apps are cached under
+Downloads for `gplay`, `github`, and `url` apps are cached under
 `${XDG_CACHE_HOME:-$HOME/.cache}/declaroid/<package-id>/`, keyed by package
 ID. A cache hit skips the download entirely on the next `apply` run,
-which matters because gplay/github downloads can be tens to hundreds of MB.
+which matters because gplay/github/url downloads can be tens to hundreds of MB.
 Use `-f`/`--force-download` to bypass the cache for one run, or
 `declaroid clear-cache` to wipe it (the whole thing, or just specific
 packages: `declaroid clear-cache com.example.app`).

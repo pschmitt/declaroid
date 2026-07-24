@@ -38,6 +38,39 @@ declare -A PROFILE_ALIASES=()
 FDROID_INDEX_UPDATED=""
 IZZYONDROID_INDEX_UPDATED=""
 
+# Every resolve_config-produced temp file (across the whole process, not
+# just the current cmd_apply/cmd_uninstall/cmd_diff/cmd_modules call) that
+# still needs to be rm -f'd at exit -- see register_resolved_config_cleanup.
+declare -a RESOLVED_CONFIG_CLEANUP_FILES=()
+RESOLVED_CONFIG_CLEANUP_TRAP_SET=""
+
+# Registers $1 (a resolve_config-produced temp file) for cleanup at
+# process exit, and is safe to call once per leaf under a meta-config's
+# `configs:` fan-out (run_meta_config calls cmd_apply/cmd_uninstall/
+# cmd_diff/cmd_modules once per leaf, in-process, not a fresh declaroid
+# invocation per leaf). Each of those functions used to register its own
+# `trap "rm -f '$resolved_config'" EXIT` directly -- trap state is
+# process-global, so the second leaf's trap silently clobbered the
+# first's, permanently leaking every leaf's merged config except the
+# last one (confirmed live: a 3-leaf `-c all.yaml` run left two of the
+# three merged configs behind in $TMPDIR). Appending to this global array
+# instead and registering the actual `trap` only once means every leaf's
+# path survives to the same, single cleanup. The immediate-expansion-into-
+# a-literal-string trick the old per-caller trap used (baking
+# $resolved_config in as a literal because a `local` won't exist in
+# whatever scope is active when an EXIT trap fires, see git history) isn't
+# needed here since RESOLVED_CONFIG_CLEANUP_FILES is a global -- it's very
+# much still in scope whenever the trap actually runs.
+register_resolved_config_cleanup() {
+  RESOLVED_CONFIG_CLEANUP_FILES+=("$1")
+
+  if [[ -z "$RESOLVED_CONFIG_CLEANUP_TRAP_SET" ]]
+  then
+    trap 'rm -f "${RESOLVED_CONFIG_CLEANUP_FILES[@]}"' EXIT
+    RESOLVED_CONFIG_CLEANUP_TRAP_SET=1
+  fi
+}
+
 # Computed once, here, at the top level -- not re-checked inside hyperlink()
 # itself. `-t 1` tests file descriptor 1 of *whatever process is currently
 # running*; once hyperlink() is called from inside a `$(...)` command
@@ -88,6 +121,31 @@ log_warn() {
 
 log_error() {
   printf '%s%sERR%s %s\n' "$C_BOLD" "$C_RED" "$C_RESET" "$1" >&2
+}
+
+# Every value-taking CLI flag (-c/--config, -d/--device, --store, -l/
+# --limit, -o/--output, -j/--jobs, --root-framework, --sort-by, ...)
+# across every subcommand's option loop reads its value as a bare "$2"
+# with no check that a $2 even exists, then `shift 2` -- given a flag as
+# the very last argv token (`declaroid devices --sort-by`, a dropped
+# argument from a script/alias/completion, etc), referencing "$2" under
+# this script's `set -u` is a fatal, raw "unbound variable" crash instead
+# of a clean usage error (confirmed live: `declaroid devices --sort-by`
+# -> "line N: $2: unbound variable"). Call this as the first thing inside
+# each such case arm, before touching "$2" -- $1 is still the flag token
+# that was actually typed (for the error message), $# is the option
+# loop's own remaining-argument count.
+require_flag_value() {
+  local flag="$1"
+  local remaining="$2"
+
+  if [[ "$remaining" -lt 2 ]]
+  then
+    log_error "$flag requires a value"
+    return 1
+  fi
+
+  return 0
 }
 
 usage() {
@@ -937,11 +995,18 @@ maybe_run_adb_stop_cmd() {
   bash -c "$stop_cmd" >&2
 }
 
+# Passes the remote pm invocation as one pre-built, explicitly-quoted
+# string, not separate adb argv words -- `adb shell` with multiple argv
+# words reconstructs the remote command line by rejoining them with
+# plain spaces and no re-quoting (same reasoning as run_root_shell's own
+# comment on `su -c`), so a $pkg containing a shell metacharacter would
+# otherwise be interpreted by the device's shell instead of being passed
+# through literally to `pm`.
 is_installed() {
   local device="$1"
   local pkg="$2"
 
-  adb -s "$device" shell pm list packages "$pkg" </dev/null 2>/dev/null \
+  adb -s "$device" shell "pm list packages '$(shell_escape_single_quoted "$pkg")'" </dev/null 2>/dev/null \
     | tr -d '\r' \
     | grep -qx "package:$pkg"
 }
@@ -954,7 +1019,7 @@ is_pkg_disabled() {
   local device="$1"
   local pkg="$2"
 
-  adb -s "$device" shell pm list packages -d "$pkg" </dev/null 2>/dev/null \
+  adb -s "$device" shell "pm list packages -d '$(shell_escape_single_quoted "$pkg")'" </dev/null 2>/dev/null \
     | tr -d '\r' \
     | grep -qx "package:$pkg"
 }
@@ -1024,8 +1089,31 @@ effective_target_user() {
   fi
 }
 
+# Rejects any key that would let cache_dir_for/module_cache_dir_for's
+# result escape $CACHE_ROOT -- a `/` anywhere, or the whole key being `.`
+# or `..`. Real Android package ids and module ids never legitimately
+# contain any of these, so this only ever fires on a malformed/mistyped
+# key -- concretely, `clear-cache` takes its pkg argument straight from
+# argv with no other validation, so `declaroid clear-cache '../../foo'`
+# previously resolved to an `rm -rf` on an arbitrary directory outside
+# the cache entirely, no confinement check anywhere in the chain.
+is_safe_cache_key() {
+  local key="$1"
+
+  [[ -z "$key" ]] && return 1
+  [[ "$key" == *"/"* ]] && return 1
+  [[ "$key" == "." || "$key" == ".." ]] && return 1
+  return 0
+}
+
 cache_dir_for() {
   local pkg="$1"
+
+  if ! is_safe_cache_key "$pkg"
+  then
+    log_error "Refusing to build a cache path for unsafe package id: '$pkg'"
+    return 1
+  fi
 
   printf '%s/%s\n' "$CACHE_ROOT" "$pkg"
 }
@@ -1509,7 +1597,15 @@ install_url() {
 # namespace -- module ids and app package ids are different namespaces
 # and could theoretically collide (unlikely, but not worth risking).
 module_cache_dir_for() {
-  printf '%s/modules/%s\n' "$CACHE_ROOT" "$1"
+  local module_id="$1"
+
+  if ! is_safe_cache_key "$module_id"
+  then
+    log_error "Refusing to build a cache path for unsafe module id: '$module_id'"
+    return 1
+  fi
+
+  printf '%s/modules/%s\n' "$CACHE_ROOT" "$module_id"
 }
 
 has_zip_files() {
@@ -1521,7 +1617,7 @@ has_zip_files() {
 
 # Emits configured modules as one row per module: id, name (defaulted to
 # id), source (defaulted to github), repo, asset (defaulted), url, path --
-# joined with U+00A7, same reasoning as app_rows (see its own comment).
+# joined with $ROW_SEP, same reasoning as app_rows (see its own comment).
 module_rows() {
   local config="$1"
 
@@ -1688,8 +1784,10 @@ resolve_module_zip() {
 is_module_installed() {
   local device="$1"
   local module_id="$2"
+  local module_id_esc
+  module_id_esc="$(shell_escape_single_quoted "$module_id")"
 
-  [[ -n "$(run_root_shell "$device" "[ -d /data/adb/modules/$module_id ] && echo yes")" ]]
+  [[ -n "$(run_root_shell "$device" "[ -d '/data/adb/modules/$module_id_esc' ] && echo yes")" ]]
 }
 
 # Pushes $2 (a local zip file path) to $1 and runs the framework-specific
@@ -1709,8 +1807,9 @@ install_module_zip() {
   local device="$1"
   local zip_path="$2"
   local framework="$3"
-  local remote_path output rc=0
+  local remote_path remote_path_esc output rc=0
   remote_path="/data/local/tmp/declaroid-module-$(basename "$zip_path")"
+  remote_path_esc="$(shell_escape_single_quoted "$remote_path")"
 
   if ! adb -s "$device" push "$zip_path" "$remote_path" >/dev/null 2>&1
   then
@@ -1720,10 +1819,10 @@ install_module_zip() {
 
   case "$framework" in
     apatch)
-      output="$(run_root_shell "$device" "apd module install $remote_path" 60)" || rc=$?
+      output="$(run_root_shell "$device" "apd module install '$remote_path_esc'" 60)" || rc=$?
       ;;
     magisk)
-      output="$(run_root_shell "$device" "magisk --install-module $remote_path" 60)" || rc=$?
+      output="$(run_root_shell "$device" "magisk --install-module '$remote_path_esc'" 60)" || rc=$?
       ;;
     *)
       log_error "Unknown root framework '$framework' (expected apatch or magisk)"
@@ -1731,7 +1830,7 @@ install_module_zip() {
       ;;
   esac
 
-  adb -s "$device" shell "rm -f $remote_path" >/dev/null 2>&1
+  adb -s "$device" shell "rm -f '$remote_path_esc'" >/dev/null 2>&1
 
   if [[ $rc -ne 0 ]]
   then
@@ -1855,7 +1954,7 @@ sync_app_disabled_state() {
       return 0
     fi
 
-    if adb -s "$DEVICE_SERIAL" shell pm disable-user "$CURRENT_PKG" </dev/null >/dev/null 2>&1
+    if adb -s "$DEVICE_SERIAL" shell "pm disable-user '$(shell_escape_single_quoted "$CURRENT_PKG")'" </dev/null >/dev/null 2>&1
     then
       log_ok "$CURRENT_NAME ($CURRENT_PKG) disabled"
     else
@@ -1873,7 +1972,7 @@ sync_app_disabled_state() {
       return 0
     fi
 
-    if adb -s "$DEVICE_SERIAL" shell pm enable "$CURRENT_PKG" </dev/null >/dev/null 2>&1
+    if adb -s "$DEVICE_SERIAL" shell "pm enable '$(shell_escape_single_quoted "$CURRENT_PKG")'" </dev/null >/dev/null 2>&1
     then
       log_ok "$CURRENT_NAME ($CURRENT_PKG) enabled"
     else
@@ -2319,8 +2418,11 @@ run_meta_config() {
 # Emits the configured apps as one row per app: name, pkg, store (defaulted),
 # repo, asset (defaulted), path, profile (defaulted), url, state.installed
 # (defaulted "true"), state.disabled (defaulted "false") -- joined with
-# U+00A7 (SECTION SIGN), not a tab. Several of these fields (repo/asset/
-# path/profile/url) are legitimately empty for most apps, and bash's `read`
+# $ROW_SEP (a single raw byte, ASCII Unit Separator 0x1F), not a tab and
+# not a printable character like U+00A7 either (see ROW_SEP's own comment
+# for why -- a real, locale-dependent bug was shipped with U+00A7 once).
+# Several of these fields (repo/asset/path/profile/url) are legitimately
+# empty for most apps, and bash's `read`
 # collapses consecutive *whitespace* IFS delimiters (tab included)
 # regardless of what IFS is set to, silently dropping empty fields and
 # shifting everything after them left by one. Using a non-whitespace,
@@ -2499,10 +2601,12 @@ cmd_apply() {
         return 0
         ;;
       -c|--config)
+        require_flag_value "$1" "$#" || { usage >&2; return 2; }
         config="$2"
         shift 2
         ;;
       -d|--device)
+        require_flag_value "$1" "$#" || { usage >&2; return 2; }
         cli_device="$2"
         shift 2
         ;;
@@ -2539,6 +2643,7 @@ cmd_apply() {
         shift
         ;;
       --root-framework)
+        require_flag_value "$1" "$#" || { usage >&2; return 2; }
         cli_root_framework="$2"
         shift 2
         ;;
@@ -2578,16 +2683,9 @@ cmd_apply() {
   then
     return 2
   fi
-  # Immediate expansion is intentional here, not the mistake SC2064
-  # usually flags: $resolved_config is a `local` that won't exist in any
-  # active scope by the time an EXIT trap actually fires (confirmed
-  # empirically -- a single-quoted, truly deferred version threw
-  # "resolved_config: unbound variable" under this script's set -u,
-  # since traps evaluate in whatever scope is active when they fire, not
-  # the scope `trap` was called from). Baking the resolved path in as a
-  # literal string now is the whole point.
-  # shellcheck disable=SC2064
-  [[ "$resolved_config" != "$config" ]] && trap "rm -f '$resolved_config'" EXIT
+  # See register_resolved_config_cleanup for why this isn't a direct
+  # `trap "rm -f '$resolved_config'" EXIT` here anymore.
+  [[ "$resolved_config" != "$config" ]] && register_resolved_config_cleanup "$resolved_config"
   config="$resolved_config"
 
   # `enforce: true` in the config is equivalent to always passing
@@ -2704,6 +2802,15 @@ cmd_apply() {
   local -a PLAN_PENDING MODULE_PLAN_PENDING REMOVAL_PLAN_PENDING
   local PLAN_SKIP_COUNT MODULE_PLAN_SKIP_COUNT MODULES_INSTALLED_COUNT=0
   local device_config
+  # Tracks which of this run's devices actually got a module installed,
+  # so --reboot only reboots those -- MODULES_INSTALLED_COUNT itself is a
+  # run-wide total (still used below for the reminder message printed
+  # when --reboot isn't passed), not per-device, so rebooting "every
+  # device in $devices whenever the total is nonzero" would reboot
+  # devices that had nothing to do with the install(s) under
+  # --bulk/--all-devices.
+  local -a DEVICES_NEEDING_REBOOT=()
+  local device_modules_installed_before
   for DEVICE_SERIAL in "${devices[@]}"
   do
     log_step "Target device: $DEVICE_SERIAL"
@@ -2792,6 +2899,8 @@ cmd_apply() {
 
     if [[ ${#configured_module_ids[@]} -gt 0 ]]
     then
+      device_modules_installed_before="$MODULES_INSTALLED_COUNT"
+
       if ! ROOT_FRAMEWORK="$(resolve_root_framework "$device_config" "$cli_root_framework" "$DEVICE_SERIAL")"
       then
         log_ok "Root not enabled/detected on $DEVICE_SERIAL, skipping configured module(s)"
@@ -2825,6 +2934,11 @@ cmd_apply() {
           fi
         fi
       fi
+
+      if [[ "$MODULES_INSTALLED_COUNT" -gt "$device_modules_installed_before" ]]
+      then
+        DEVICES_NEEDING_REBOOT+=("$DEVICE_SERIAL")
+      fi
     fi
 
     if [[ -n "$obtainium_needed" ]] && ! sync_obtainium_repos "$device_config" "$DEVICE_SERIAL" "$cli_root_framework"
@@ -2845,7 +2959,7 @@ cmd_apply() {
     if [[ -n "$do_reboot" ]]
     then
       local device
-      for device in "${devices[@]}"
+      for device in "${DEVICES_NEEDING_REBOOT[@]}"
       do
         if [[ -n "$DRY_RUN" ]]
         then
@@ -2947,10 +3061,12 @@ cmd_uninstall() {
         return 0
         ;;
       -c|--config)
+        require_flag_value "$1" "$#" || { usage >&2; return 2; }
         config="$2"
         shift 2
         ;;
       -d|--device)
+        require_flag_value "$1" "$#" || { usage >&2; return 2; }
         cli_device="$2"
         shift 2
         ;;
@@ -2993,16 +3109,9 @@ cmd_uninstall() {
   then
     return 2
   fi
-  # Immediate expansion is intentional here, not the mistake SC2064
-  # usually flags: $resolved_config is a `local` that won't exist in any
-  # active scope by the time an EXIT trap actually fires (confirmed
-  # empirically -- a single-quoted, truly deferred version threw
-  # "resolved_config: unbound variable" under this script's set -u,
-  # since traps evaluate in whatever scope is active when they fire, not
-  # the scope `trap` was called from). Baking the resolved path in as a
-  # literal string now is the whole point.
-  # shellcheck disable=SC2064
-  [[ "$resolved_config" != "$config" ]] && trap "rm -f '$resolved_config'" EXIT
+  # See register_resolved_config_cleanup for why this isn't a direct
+  # `trap "rm -f '$resolved_config'" EXIT` here anymore.
+  [[ "$resolved_config" != "$config" ]] && register_resolved_config_cleanup "$resolved_config"
   config="$resolved_config"
   config_has_conditions "$config" && check_deps jq
 
@@ -3126,6 +3235,7 @@ cmd_clear_cache() {
   fi
 
   local pkg dir
+  local -a to_remove_pkgs=() to_remove_dirs=()
   for pkg in "${pkgs[@]}"
   do
     dir="$(cache_dir_for "$pkg")"
@@ -3136,14 +3246,45 @@ cmd_clear_cache() {
       continue
     fi
 
-    if [[ -n "$DRY_RUN" ]]
-    then
-      printf '  would remove %s cache: %s\n' "$pkg" "$dir"
-      continue
-    fi
+    to_remove_pkgs+=("$pkg")
+    to_remove_dirs+=("$dir")
+  done
 
-    rm -rf "$dir"
-    log_ok "$pkg cache cleared"
+  [[ ${#to_remove_pkgs[@]} -eq 0 ]] && return 0
+
+  if [[ -n "$DRY_RUN" ]]
+  then
+    local i
+    for i in "${!to_remove_pkgs[@]}"
+    do
+      printf '  would remove %s cache: %s\n' "${to_remove_pkgs[$i]}" "${to_remove_dirs[$i]}"
+    done
+    return 0
+  fi
+
+  # Same confirm-once-per-batch pattern as apply's install/removal/module
+  # plans, not one prompt per package -- a `clear-cache a b c` shouldn't
+  # turn into three separate y/N prompts.
+  if [[ -z "$assume_yes" ]]
+  then
+    printf '%sThis will remove the cache for: %s%s\n' "$C_BOLD" "${to_remove_pkgs[*]}" "$C_RESET"
+    local reply
+    read -rp "Continue? [y/N] " reply
+    case "$reply" in
+      y|Y|yes|YES)
+        ;;
+      *)
+        log_step "Aborted"
+        return 0
+        ;;
+    esac
+  fi
+
+  local i
+  for i in "${!to_remove_pkgs[@]}"
+  do
+    rm -rf "${to_remove_dirs[$i]}"
+    log_ok "${to_remove_pkgs[$i]} cache cleared"
   done
 }
 
@@ -3265,6 +3406,11 @@ search_fdroid() {
     [[ -z "$line" ]] && continue
     [[ "$line" =~ ^([^[:space:]]+)[[:space:]]+(.*)$ ]] || continue
 
+    # Checked before printing, not after -- a limit of 0 (or negative)
+    # must print nothing at all, not one row before the break condition
+    # is ever evaluated.
+    [[ $count -ge $limit ]] && break
+
     pkg="${BASH_REMATCH[1]}"
     rest="${BASH_REMATCH[2]}"
 
@@ -3274,7 +3420,6 @@ search_fdroid() {
     printf '%s\t%s\tfdroid\t\n' "$name" "$pkg"
 
     count=$((count + 1))
-    [[ $count -ge $limit ]] && break
   done
 }
 
@@ -3300,6 +3445,9 @@ search_izzyondroid() {
     [[ -z "$line" ]] && continue
     [[ "$line" =~ ^([^[:space:]]+)[[:space:]]+(.*)$ ]] || continue
 
+    # Checked before printing, not after -- see search_fdroid's comment.
+    [[ $count -ge $limit ]] && break
+
     pkg="${BASH_REMATCH[1]}"
     rest="${BASH_REMATCH[2]}"
 
@@ -3309,7 +3457,6 @@ search_izzyondroid() {
     printf '%s\t%s\tizzyondroid\t\n' "$name" "$pkg"
 
     count=$((count + 1))
-    [[ $count -ge $limit ]] && break
   done
 }
 
@@ -3326,10 +3473,12 @@ cmd_search() {
         return 0
         ;;
       --store)
+        require_flag_value "$1" "$#" || { usage >&2; return 2; }
         store="$2"
         shift 2
         ;;
       -l|--limit)
+        require_flag_value "$1" "$#" || { usage >&2; return 2; }
         limit="$2"
         shift 2
         ;;
@@ -3710,14 +3859,17 @@ cmd_add() {
         return 0
         ;;
       -c|--config)
+        require_flag_value "$1" "$#" || { usage >&2; return 2; }
         config="$2"
         shift 2
         ;;
       --store)
+        require_flag_value "$1" "$#" || { usage >&2; return 2; }
         store="$2"
         shift 2
         ;;
       -l|--limit)
+        require_flag_value "$1" "$#" || { usage >&2; return 2; }
         limit="$2"
         shift 2
         ;;
@@ -3838,14 +3990,17 @@ cmd_download() {
         return 0
         ;;
       --store)
+        require_flag_value "$1" "$#" || { usage >&2; return 2; }
         store="$2"
         shift 2
         ;;
       -l|--limit)
+        require_flag_value "$1" "$#" || { usage >&2; return 2; }
         limit="$2"
         shift 2
         ;;
       -o|--output)
+        require_flag_value "$1" "$#" || { usage >&2; return 2; }
         output="$2"
         shift 2
         ;;
@@ -3989,6 +4144,7 @@ cmd_devices() {
         return 0
         ;;
       --sort-by)
+        require_flag_value "$1" "$#" || { usage >&2; return 2; }
         sort_by="$2"
         shift 2
         ;;
@@ -4111,10 +4267,12 @@ cmd_diff() {
         return 0
         ;;
       -c|--config)
+        require_flag_value "$1" "$#" || { usage >&2; return 2; }
         config="$2"
         shift 2
         ;;
       -d|--device)
+        require_flag_value "$1" "$#" || { usage >&2; return 2; }
         cli_device="$2"
         shift 2
         ;;
@@ -4123,6 +4281,7 @@ cmd_diff() {
         shift
         ;;
       --sort-by)
+        require_flag_value "$1" "$#" || { usage >&2; return 2; }
         sort_by="$2"
         shift 2
         ;;
@@ -4174,16 +4333,9 @@ cmd_diff() {
   then
     return 2
   fi
-  # Immediate expansion is intentional here, not the mistake SC2064
-  # usually flags: $resolved_config is a `local` that won't exist in any
-  # active scope by the time an EXIT trap actually fires (confirmed
-  # empirically -- a single-quoted, truly deferred version threw
-  # "resolved_config: unbound variable" under this script's set -u,
-  # since traps evaluate in whatever scope is active when they fire, not
-  # the scope `trap` was called from). Baking the resolved path in as a
-  # literal string now is the whole point.
-  # shellcheck disable=SC2064
-  [[ "$resolved_config" != "$config" ]] && trap "rm -f '$resolved_config'" EXIT
+  # See register_resolved_config_cleanup for why this isn't a direct
+  # `trap "rm -f '$resolved_config'" EXIT` here anymore.
+  [[ "$resolved_config" != "$config" ]] && register_resolved_config_cleanup "$resolved_config"
   config="$resolved_config"
   config_has_conditions "$config" && check_deps jq
 
@@ -4279,14 +4431,17 @@ cmd_modules() {
         return 0
         ;;
       -c|--config)
+        require_flag_value "$1" "$#" || { usage >&2; return 2; }
         config="$2"
         shift 2
         ;;
       -d|--device)
+        require_flag_value "$1" "$#" || { usage >&2; return 2; }
         cli_device="$2"
         shift 2
         ;;
       --root-framework)
+        require_flag_value "$1" "$#" || { usage >&2; return 2; }
         cli_framework="$2"
         shift 2
         ;;
@@ -4341,16 +4496,9 @@ cmd_modules() {
   then
     return 2
   fi
-  # Immediate expansion is intentional here, not the mistake SC2064
-  # usually flags: $resolved_config is a `local` that won't exist in any
-  # active scope by the time an EXIT trap actually fires (confirmed
-  # empirically -- a single-quoted, truly deferred version threw
-  # "resolved_config: unbound variable" under this script's set -u,
-  # since traps evaluate in whatever scope is active when they fire, not
-  # the scope `trap` was called from). Baking the resolved path in as a
-  # literal string now is the whole point.
-  # shellcheck disable=SC2064
-  [[ "$resolved_config" != "$config" ]] && trap "rm -f '$resolved_config'" EXIT
+  # See register_resolved_config_cleanup for why this isn't a direct
+  # `trap "rm -f '$resolved_config'" EXIT` here anymore.
+  [[ "$resolved_config" != "$config" ]] && register_resolved_config_cleanup "$resolved_config"
   config="$resolved_config"
 
   local devices_raw
@@ -4596,8 +4744,44 @@ run_root_shell() {
   local device="$1"
   local cmd="$2"
   local secs="${3:-15}"
+  local cmd_esc
 
-  timeout "$secs" adb -s "$device" shell "su -c '$cmd'" </dev/null 2>/dev/null | tr -d '\r'
+  # $cmd itself commonly contains its own embedded single quotes (every
+  # caller that wraps a variable in '...' for its own quoting purposes --
+  # see shell_escape_single_quoted's callers). Wrapping $cmd directly in
+  # `su -c '$cmd'` without escaping it first would let any such embedded
+  # quote prematurely close *this* outer quoting instead of $cmd's own --
+  # confirmed empirically: `adb shell`'s own remote parse of the whole
+  # "su -c '$cmd'" string is what determines su's actual -c argument, and
+  # a literal `'` anywhere inside $cmd closes that outer quote right
+  # there, splitting the rest of $cmd into separate, unquoted (and, for
+  # anything with its own escaped quotes, syntactically broken) tokens at
+  # that same outer parse level -- before su/the inner `sh -c` ever gets
+  # a say. Escaping $cmd here first makes the outer parse recover $cmd
+  # byte-for-byte as su's single -c argument, exactly as if it had been
+  # passed as its own argv element, regardless of what it contains.
+  cmd_esc="$(shell_escape_single_quoted "$cmd")"
+
+  timeout "$secs" adb -s "$device" shell "su -c '$cmd_esc'" </dev/null 2>/dev/null | tr -d '\r'
+}
+
+# Escapes $1 for safe embedding inside an *already-open* single-quoted
+# remote-shell string -- i.e. a literal '...' the caller writes directly
+# in its own command-string source, with this call substituted somewhere
+# in the middle of it (see is_module_installed/install_module_zip/
+# sync_obtainium_repos for the pattern). Does NOT add its own surrounding
+# quotes -- it only neutralizes a literal `'` in $1 (POSIX sh's standard
+# idiom: close the quote, emit a backslash-escaped literal quote, reopen
+# the quote), which is the only character that's special inside single
+# quotes to begin with. Every one of these command strings ultimately
+# gets wrapped in `su -c '...'` by run_root_shell (or its non-root
+# equivalent, obtainium_shell/plain `adb shell`), so a config-supplied
+# module id or Obtainium package id containing an unescaped `'` could
+# previously break out of that quoting and run arbitrary commands --
+# under su, as root.
+shell_escape_single_quoted() {
+  local s="$1"
+  printf '%s' "${s//\'/\'\\\'\'}"
 }
 
 # Prints "apatch" or "magisk" (whichever's CLI binary is reachable through
@@ -4673,8 +4857,8 @@ resolve_root_framework() {
 
 # Emits configured Obtainium-tracked repos as one row per entry: pkg, url,
 # settings (a compact JSON object of Obtainium `additionalSettings`
-# overrides, defaulting to "{}") -- joined with U+00A7, same convention as
-# app_rows/module_rows. `settings:` keys are passed straight through
+# overrides, defaulting to "{}") -- joined with $ROW_SEP, same convention
+# as app_rows/module_rows. `settings:` keys are passed straight through
 # verbatim, using Obtainium's own upstream setting names as-is (e.g.
 # `includePrereleases`) -- deliberately not translated/renamed into a
 # declaroid-specific vocabulary, which would just be an extra layer to
@@ -4951,13 +5135,18 @@ sync_obtainium_repos() {
     fi
   fi
 
-  local row pkg url settings_json rc=0
+  local row pkg pkg_esc url settings_json rc=0
   for row in "${rows[@]}"
   do
     [[ -z "$row" ]] && continue
     IFS="$ROW_SEP" read -r pkg url settings_json <<< "$row"
+    # $pkg is config-supplied (an obtainium: pkg: entry, or auto-tracked
+    # from an apps: entry) and gets embedded into several remote
+    # single-quoted shell-command strings below -- escape it once here
+    # rather than at each embed point (see shell_escape_single_quoted).
+    pkg_esc="$(shell_escape_single_quoted "$pkg")"
 
-    if [[ -n "$(obtainium_shell "$device" "$use_root" "[ -e '$app_data_dir/$pkg.json' ] && echo yes")" ]]
+    if [[ -n "$(obtainium_shell "$device" "$use_root" "[ -e '$app_data_dir/$pkg_esc.json' ] && echo yes")" ]]
     then
       [[ -n "$VERBOSE" ]] && log_skip "Obtainium repo $pkg already tracked"
       continue
@@ -4983,7 +5172,14 @@ sync_obtainium_repos() {
       continue
     fi
 
+    # remote_tmp stays the raw, unescaped path for the actual adb push/rm
+    # below -- those take it as a literal argv path, not shell-parsed, so
+    # escaping it would corrupt the real filename. remote_tmp_esc is the
+    # separate, escaped form for embedding into the remote shell-command
+    # strings (write_cmd, the rm -f below) that DO get shell-parsed.
     local remote_tmp="/data/local/tmp/declaroid-obtainium-$pkg.json"
+    local remote_tmp_esc
+    remote_tmp_esc="$(shell_escape_single_quoted "$remote_tmp")"
     if ! adb -s "$device" push "$json_file" "$remote_tmp" >/dev/null 2>&1
     then
       log_error "Failed to push Obtainium JSON for $pkg"
@@ -4993,9 +5189,9 @@ sync_obtainium_repos() {
     fi
     rm -f "$json_file"
 
-    local write_cmd="cp '$remote_tmp' '$app_data_dir/$pkg.json'"
-    [[ -n "$use_root" ]] && write_cmd+=" && chown $owner '$app_data_dir/$pkg.json'"
-    write_cmd+=" && chmod 660 '$app_data_dir/$pkg.json'"
+    local write_cmd="cp '$remote_tmp_esc' '$app_data_dir/$pkg_esc.json'"
+    [[ -n "$use_root" ]] && write_cmd+=" && chown $owner '$app_data_dir/$pkg_esc.json'"
+    write_cmd+=" && chmod 660 '$app_data_dir/$pkg_esc.json'"
 
     if obtainium_shell "$device" "$use_root" "$write_cmd" >/dev/null
     then
@@ -5005,7 +5201,7 @@ sync_obtainium_repos() {
       rc=1
     fi
 
-    adb -s "$device" shell "rm -f '$remote_tmp'" >/dev/null 2>&1
+    adb -s "$device" shell "rm -f '$remote_tmp_esc'" >/dev/null 2>&1
   done
 
   return "$rc"
@@ -5150,7 +5346,16 @@ resolve_app_label() {
     return 0
   fi
 
-  apk_path="$(adb -s "$device" shell pm path "$pkg" </dev/null 2>/dev/null | head -1 | tr -d '\r')"
+  # `|| true` on both of these: `head -1` (and grep -m1 below) can stop
+  # reading as soon as it has its one line, SIGPIPEing the still-writing
+  # producer (adb/aapt2) -- under this script's pipefail that's a
+  # nonzero pipeline status, and a bare, unguarded assignment would abort
+  # this function (and everything after it, including the tmp_apk cleanup
+  # right below) via set -e. Same bug class AGENTS.md already documents
+  # fixing once for `add`'s `yq | head -1` -- this is a second call site
+  # that fix missed. An empty result either way is handled correctly
+  # below (falls through to "couldn't resolve a label", not a crash).
+  apk_path="$(adb -s "$device" shell pm path "$pkg" </dev/null 2>/dev/null | head -1 | tr -d '\r')" || true
   apk_path="${apk_path#package:}"
 
   if [[ -z "$apk_path" ]]
@@ -5166,7 +5371,7 @@ resolve_app_label() {
     return 1
   fi
 
-  label="$(aapt2 dump badging "$tmp_apk" 2>/dev/null | grep -m1 "^application-label:")"
+  label="$(aapt2 dump badging "$tmp_apk" 2>/dev/null | grep -m1 "^application-label:")" || true
   rm -f "$tmp_apk"
 
   if [[ "$label" =~ ^application-label:\'(.*)\'$ ]]
@@ -5198,10 +5403,12 @@ cmd_generate_config() {
         return 0
         ;;
       -d|--device)
+        require_flag_value "$1" "$#" || { usage >&2; return 2; }
         cli_device="$2"
         shift 2
         ;;
       -o|--output)
+        require_flag_value "$1" "$#" || { usage >&2; return 2; }
         output="$2"
         shift 2
         ;;
@@ -5218,10 +5425,12 @@ cmd_generate_config() {
         shift
         ;;
       -j|--jobs)
+        require_flag_value "$1" "$#" || { usage >&2; return 2; }
         jobs="$2"
         shift 2
         ;;
       --root-framework)
+        require_flag_value "$1" "$#" || { usage >&2; return 2; }
         cli_root_framework="$2"
         shift 2
         ;;
