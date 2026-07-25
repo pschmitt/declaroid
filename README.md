@@ -49,7 +49,7 @@ apps:
 
 ```console
 $ declaroid apply
-INF Target device: 10.5.0.110:43411
+INF Target device: Pixel_5 (redfin) at 10.5.0.110:43411
 Install plan for 10.5.0.110:43411: 3 app(s) to install (1 already installed)
   Google Maps (com.google.android.apps.maps) [gplay]
   Aurora Store (com.aurora.store) [fdroid]
@@ -522,7 +522,7 @@ read-only:
 
 ```console
 $ declaroid modules
-INF Target device: 10.5.0.110:42539
+INF Target device: Pixel_5 (redfin) at 10.5.0.110:42539
 NAME                          ID              VERSION          ENABLED  STATUS
 Play Integrity Fix [INJECT]   playintegrityfix  v4.7-1-inject-s  yes      installed
 Tricky Store                  tricky_store      v1.4.1           yes      installed
@@ -613,7 +613,7 @@ non-rooted device -- no empty `root:`/`modules:` clutter).
 
 ```console
 $ declaroid apply
-INF Target device: 10.5.0.159:37819
+INF Target device: MI_PAD_4 (clover) at 10.5.0.159:37819
 OK Nothing to install on 10.5.0.159:37819 (30 already installed)
 Module install plan for 10.5.0.159:37819: 1 module(s) to install
   Play Integrity Fix [INJECT] (playintegrityfix) [github]

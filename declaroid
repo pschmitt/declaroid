@@ -547,6 +547,40 @@ format_device_line() {
   fi
 }
 
+# Colorized "MODEL (CODENAME) at SERIAL" for the "Target device: ..." log
+# line every cmd_apply/cmd_uninstall/cmd_diff/cmd_modules per-device loop
+# prints -- a distinct shape/purpose from format_device_line above (that
+# one lists ambiguous *candidates* to disambiguate with -d/$TARGET_DEVICE,
+# serial-first since that's what you'd actually type, deliberately
+# uncolored since it's a numbered list). $serial here is already the one
+# resolved, connected device this run is about to act on, so the model/
+# codename read like a human-friendly headline and the serial itself is
+# secondary, trailing detail. Falls back to the bare, uncolored $serial if
+# adb devices -l has no model:/device: for it at all (an unusual adb
+# build, or -- in tests -- a fake serial with no real device behind it).
+format_target_device() {
+  local serial="$1"
+  local line model codename
+
+  line="$(adb devices -l 2>/dev/null | awk -v s="$serial" '$1 == s')"
+
+  model=""
+  codename=""
+  [[ "$line" =~ model:([^[:space:]]+) ]] && model="${BASH_REMATCH[1]}"
+  [[ "$line" =~ device:([^[:space:]]+) ]] && codename="${BASH_REMATCH[1]}"
+
+  if [[ -z "$model" && -z "$codename" ]]
+  then
+    printf '%s\n' "$serial"
+    return 0
+  fi
+
+  printf '%s%s%s (%s%s%s) at %s\n' \
+    "$C_BOLD" "${model:-?}" "$C_RESET" \
+    "$C_CYAN" "${codename:-?}" "$C_RESET" \
+    "$serial"
+}
+
 # Pretty-prints TSV (with a header row) read from stdin. Uses tsvtool if it's
 # on PATH (https://github.com/pschmitt/tsvtool), otherwise falls back to
 # column -t with a bolded header, otherwise just passes the TSV through.
@@ -3280,7 +3314,7 @@ cmd_apply() {
   local module_root_resolved
   for DEVICE_SERIAL in "${devices[@]}"
   do
-    log_step "Target device: $DEVICE_SERIAL"
+    log_step "Target device: $(format_target_device "$DEVICE_SERIAL")"
     TARGET_USER="$(resolve_target_user "$DEVICE_SERIAL")"
 
     # Shadows $config with a copy that's had every apps:/modules: entry
@@ -3744,7 +3778,7 @@ cmd_uninstall() {
   local DEVICE_SERIAL overall_rc=0 device_config
   for DEVICE_SERIAL in "${devices[@]}"
   do
-    log_step "Target device: $DEVICE_SERIAL"
+    log_step "Target device: $(format_target_device "$DEVICE_SERIAL")"
 
     if ! device_config="$(filter_config_for_device "$config" "$DEVICE_SERIAL")"
     then
@@ -4976,7 +5010,7 @@ cmd_diff() {
   local DEVICE_SERIAL CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE CURRENT_URL CURRENT_STATE_INSTALLED CURRENT_STATE_DISABLED device_config
   for DEVICE_SERIAL in "${devices[@]}"
   do
-    log_step "Target device: $DEVICE_SERIAL"
+    log_step "Target device: $(format_target_device "$DEVICE_SERIAL")"
 
     if ! device_config="$(filter_config_for_device "$config" "$DEVICE_SERIAL")"
     then
@@ -5128,7 +5162,7 @@ cmd_modules() {
   local -a configured_rows
   for DEVICE_SERIAL in "${devices[@]}"
   do
-    log_step "Target device: $DEVICE_SERIAL"
+    log_step "Target device: $(format_target_device "$DEVICE_SERIAL")"
 
     if ! device_config="$(filter_config_for_device "$config" "$DEVICE_SERIAL")"
     then
