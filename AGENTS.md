@@ -684,15 +684,42 @@ incomplete change, not a follow-up.
   from "absent," so never reach for it when that distinction matters.
 - `cmd_modules` stays read-only (drift reporting only, same shape as
   `cmd_diff`) -- but `apply` *does* install missing modules now (see
-  below). Still deliberately no enable/disable/uninstall support: module
-  state changes only take effect on next boot for both frameworks (`apply`
-  never reboots on its own unless `--reboot` is given -- a `WRN ... reboot
-  required` reminder is printed instead otherwise), and APatch's own CLI `module
-  install` has a documented failure mode
+  below). APatch's own CLI `module install` has a documented failure mode
   ([bmax121/APatch#633](https://github.com/bmax121/APatch/issues/633))
   that its GUI app doesn't hit, with no known root cause -- untested here
   since both real installs done while building this were against a Magisk
   device, not APatch; be extra careful testing the APatch install path.
+- **Module enable/disable/uninstall (added later) go through the same two
+  on-disk marker files every module itself already relies on, never a
+  framework CLI command or a raw `rm -rf`.** `disable`
+  (`/data/adb/modules/<id>/disable`, touch to disable/rm to enable) and
+  `remove` (`/data/adb/modules/<id>/remove`, touch to uninstall) are both
+  Magisk's own established convention, and APatch honors the identical
+  files (same "both frameworks use the identical directory/module.prop/
+  marker-file convention" reasoning `list_magisk_modules` already
+  establishes for reading state, just now also used for writing it).
+  `rm -rf`ing a module directory directly was considered and rejected: not
+  safe against a module with active bind-mounts/overlays, and not how
+  either framework expects removal to happen -- the actual directory
+  deletion is deferred to next boot, done by Magisk/APatch itself before
+  anything else mounts, exactly like `list_magisk_modules`'s own comment
+  already predicted ("a module is fully removed via a remove marker
+  instead, but that's a pending-uninstall state") back when this file was
+  still read-only.
+  `is_module_installed`/`list_root_modules` deliberately do NOT special-
+  case a pending-`remove` module as anything other than "installed" --
+  same already-documented choice, re-running `apply --enforce`/an
+  explicit `state.installed: false` before the actual reboot just
+  re-touches `remove` again, harmlessly.
+  `sync_module_disabled_state`/`uninstall_module` both increment
+  `MODULES_CHANGED_COUNT` (renamed from `MODULES_INSTALLED_COUNT` for
+  exactly this reason: a reboot is required for every module state
+  change, not just a fresh install) so `--reboot`/the end-of-run reminder
+  cover enable/disable/removal too, not just installs.
+  **Untested against a real device** -- built and unit-tested (mocked
+  `run_root_shell`/`adb`) without one available; verify the actual
+  `touch`/marker-file behavior against a real rooted Magisk *and* APatch
+  device before relying on it, per this file's own testing rule above.
 - **`fetch_github_release` is reused verbatim for modules, not
   duplicated** -- `resolve_module_zip`'s `github` branch shadows
   `CURRENT_REPO`/`CURRENT_ASSET` as locals from `CURRENT_MODULE_REPO`/

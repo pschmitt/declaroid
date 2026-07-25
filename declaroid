@@ -1779,20 +1779,25 @@ fetch_url_zip() {
 }
 
 # Emits configured modules as one row per module: id, name (defaulted to
-# id), source (defaulted to github), repo, asset (defaulted), url, path --
-# joined with $ROW_SEP, same reasoning as app_rows (see its own comment).
+# id), source (defaulted to github), repo, asset (defaulted), url, path,
+# state.installed (defaulted true, i.e. "not explicitly false"), state.disabled
+# (defaulted false) -- joined with $ROW_SEP, same reasoning as app_rows (see
+# its own comment) including the trailing state.*/two-more-fields
+# convention (see AGENTS.md's "Per-app state.installed/state.disabled"
+# entry -- this is that same trick applied to modules:).
 module_rows() {
   local config="$1"
 
   # shellcheck disable=SC2016
   yq -r '(.modules // [])[] |
-    [.id, (.name // .id), (.source // "github"), (.repo // ""), (.asset // "\\.zip$"), (.url // ""), (.path // "")] | join("'"$ROW_SEP"'")' "$config"
+    [.id, (.name // .id), (.source // "github"), (.repo // ""), (.asset // "\\.zip$"), (.url // ""), (.path // ""), ((.state.installed == false) | not), (.state.disabled == true)] | join("'"$ROW_SEP"'")' "$config"
 }
 
 # Same convention as for_each_app -- see its comment. Calls module_fn (a
 # zero-arg function) once per configured module, with CURRENT_MODULE_ID/
 # CURRENT_MODULE_NAME/CURRENT_MODULE_SOURCE/CURRENT_MODULE_REPO/
-# CURRENT_MODULE_ASSET/CURRENT_MODULE_URL/CURRENT_MODULE_PATH set for it to
+# CURRENT_MODULE_ASSET/CURRENT_MODULE_URL/CURRENT_MODULE_PATH/
+# CURRENT_MODULE_STATE_INSTALLED/CURRENT_MODULE_STATE_DISABLED set for it to
 # read. Uses mapfile + a plain for loop, not a `while read < <(...)`, per
 # the ban on that construct elsewhere in this file.
 for_each_module() {
@@ -1813,7 +1818,7 @@ for_each_module() {
     # Without this guard, a modules-less or `modules: []` config would spin
     # up one phantom iteration with every CURRENT_MODULE_* field empty.
     [[ -z "$row" ]] && continue
-    IFS="$ROW_SEP" read -r CURRENT_MODULE_ID CURRENT_MODULE_NAME CURRENT_MODULE_SOURCE CURRENT_MODULE_REPO CURRENT_MODULE_ASSET CURRENT_MODULE_URL CURRENT_MODULE_PATH <<< "$row"
+    IFS="$ROW_SEP" read -r CURRENT_MODULE_ID CURRENT_MODULE_NAME CURRENT_MODULE_SOURCE CURRENT_MODULE_REPO CURRENT_MODULE_ASSET CURRENT_MODULE_URL CURRENT_MODULE_PATH CURRENT_MODULE_STATE_INSTALLED CURRENT_MODULE_STATE_DISABLED <<< "$row"
 
     if ! "$module_fn"
     then
@@ -1939,6 +1944,54 @@ is_module_installed() {
   [[ -n "$(run_root_shell "$device" "[ -d '/data/adb/modules/$module_id_esc' ] && echo yes")" ]]
 }
 
+# True if $2's module directory on $1 has the `disable` marker file --
+# same convention list_magisk_modules already reads to report a module's
+# enabled/disabled sub-state (see its comment: both Magisk and APatch
+# honor this identical on-disk marker, `apd module list`'s own "enabled"
+# JSON field is just APatch's nicer wrapper around the same underlying
+# file). Framework-agnostic on purpose, same reasoning is_module_installed
+# and uninstall_module already rely on: a plain filesystem check/mutation
+# through a root shell works identically for either framework, with no
+# need for two separate apd-vs-magisk code paths the way install actually
+# needs (only install extracts and runs a module's own framework-specific
+# install scripts).
+is_module_disabled() {
+  local device="$1"
+  local module_id="$2"
+  local module_id_esc
+  module_id_esc="$(shell_escape_single_quoted "$module_id")"
+
+  [[ -n "$(run_root_shell "$device" "[ -f '/data/adb/modules/$module_id_esc/disable' ] && echo yes")" ]]
+}
+
+# Marks $2's module directory on $1 for removal by touching its `remove`
+# marker file -- the actual directory deletion is Magisk/APatch's own job,
+# performed during next boot before anything else mounts (same reasoning
+# `disable` gets its own marker file rather than this script touching
+# module internals directly: this is the convention every module itself
+# relies on, not an rm -rf declaroid invents). Deliberately NOT `rm -rf`
+# the directory outright -- that's unsafe against a module with active
+# bind-mounts/overlays and isn't how either framework expects a module to
+# be removed; `list_magisk_modules`'s own comment already notes "a module
+# is fully removed via a remove marker instead" as the established
+# on-disk convention this follows. Same "just touch the filesystem
+# directly" approach as is_module_installed/is_module_disabled above,
+# rather than shelling out to `apd module uninstall`/`magisk
+# --remove-modules` (framework-specific commands this script would
+# otherwise need two separate branches for). Like every other module
+# state change, this only actually takes effect on next boot for both
+# frameworks -- callers are responsible for the same reboot-reminder/
+# --reboot handling install already gets (see cmd_apply's
+# MODULES_CHANGED_COUNT).
+uninstall_module() {
+  local device="$1"
+  local module_id="$2"
+  local module_id_esc
+  module_id_esc="$(shell_escape_single_quoted "$module_id")"
+
+  run_root_shell "$device" "touch '/data/adb/modules/$module_id_esc/remove'" >/dev/null
+}
+
 # Pushes $2 (a local zip file path) to $1 and runs the framework-specific
 # module install command through a root shell. run_root_shell's exit
 # status here genuinely reflects the remote apd/magisk command's own exit
@@ -1996,38 +2049,136 @@ install_module_zip() {
 # as install_app. Increments the run-wide MODULES_INSTALLED_COUNT on a
 # genuinely new install (not on skip), so cmd_apply can print a single
 # "reboot required" reminder at the end instead of one per module.
+# Converges $DEVICE_SERIAL's enabled/disabled state for CURRENT_MODULE_ID
+# to match CURRENT_MODULE_STATE_DISABLED, via is_module_disabled/the
+# `disable` marker file (touch to disable, rm to enable) -- same
+# structure and symmetric-reversibility as sync_app_disabled_state (see
+# its comment), just module-shaped. Counts a real toggle in
+# MODULES_CHANGED_COUNT: like install/uninstall, this only takes effect on
+# next boot for both frameworks, so it needs the same reboot-reminder/
+# --reboot handling.
+sync_module_disabled_state() {
+  local currently_disabled=""
+  is_module_disabled "$DEVICE_SERIAL" "$CURRENT_MODULE_ID" && currently_disabled=1
+
+  if [[ "$CURRENT_MODULE_STATE_DISABLED" == true ]]
+  then
+    [[ -n "$currently_disabled" ]] && return 0
+
+    log_step "Disabling module $CURRENT_MODULE_NAME ($CURRENT_MODULE_ID)"
+
+    if [[ -n "$DRY_RUN" ]]
+    then
+      printf '  would disable module %s\n' "$CURRENT_MODULE_ID"
+      return 0
+    fi
+
+    local module_id_esc
+    module_id_esc="$(shell_escape_single_quoted "$CURRENT_MODULE_ID")"
+    if run_root_shell "$DEVICE_SERIAL" "touch '/data/adb/modules/$module_id_esc/disable'" >/dev/null
+    then
+      log_ok "$CURRENT_MODULE_NAME ($CURRENT_MODULE_ID) disabled"
+      MODULES_CHANGED_COUNT=$((MODULES_CHANGED_COUNT + 1))
+    else
+      log_error "Failed to disable $CURRENT_MODULE_NAME ($CURRENT_MODULE_ID)"
+      return 1
+    fi
+  else
+    [[ -z "$currently_disabled" ]] && return 0
+
+    log_step "Enabling module $CURRENT_MODULE_NAME ($CURRENT_MODULE_ID)"
+
+    if [[ -n "$DRY_RUN" ]]
+    then
+      printf '  would enable module %s\n' "$CURRENT_MODULE_ID"
+      return 0
+    fi
+
+    local module_id_esc
+    module_id_esc="$(shell_escape_single_quoted "$CURRENT_MODULE_ID")"
+    if run_root_shell "$DEVICE_SERIAL" "rm -f '/data/adb/modules/$module_id_esc/disable'" >/dev/null
+    then
+      log_ok "$CURRENT_MODULE_NAME ($CURRENT_MODULE_ID) enabled"
+      MODULES_CHANGED_COUNT=$((MODULES_CHANGED_COUNT + 1))
+    else
+      log_error "Failed to enable $CURRENT_MODULE_NAME ($CURRENT_MODULE_ID)"
+      return 1
+    fi
+  fi
+}
+
+# `state.installed: false` modules are skipped entirely here (return 0
+# immediately, no log line) -- they're handled by build_module_removal_plan/
+# cmd_apply's module removal pass instead, not this one, same split
+# install_app has for apps (see its own comment). Otherwise, once installed
+# (or already present), state.disabled: is converged via
+# sync_module_disabled_state -- called even when the module was already
+# installed, not just on a fresh install, same "install it, then disable"
+# reasoning install_app documents.
 install_module_app() {
   local rc=0
+
+  if [[ "$CURRENT_MODULE_STATE_INSTALLED" == false ]]
+  then
+    return 0
+  fi
 
   if is_module_installed "$DEVICE_SERIAL" "$CURRENT_MODULE_ID"
   then
     [[ -n "$VERBOSE" ]] && log_skip "$CURRENT_MODULE_NAME ($CURRENT_MODULE_ID) already installed"
-    return 0
-  fi
-
-  log_step "Installing module $CURRENT_MODULE_NAME ($CURRENT_MODULE_ID) [$CURRENT_MODULE_SOURCE]"
-
-  if [[ -n "$DRY_RUN" ]]
-  then
-    printf '  would install %s via %s\n' "$CURRENT_MODULE_ID" "$CURRENT_MODULE_SOURCE"
-    return 0
-  fi
-
-  local zip_path
-  if ! zip_path="$(resolve_module_zip)"
-  then
-    return 1
-  fi
-
-  if install_module_zip "$DEVICE_SERIAL" "$zip_path" "$ROOT_FRAMEWORK"
-  then
-    log_ok "$CURRENT_MODULE_NAME ($CURRENT_MODULE_ID) installed"
-    MODULES_INSTALLED_COUNT=$((MODULES_INSTALLED_COUNT + 1))
   else
-    rc=1
+    log_step "Installing module $CURRENT_MODULE_NAME ($CURRENT_MODULE_ID) [$CURRENT_MODULE_SOURCE]"
+
+    if [[ -n "$DRY_RUN" ]]
+    then
+      printf '  would install %s via %s\n' "$CURRENT_MODULE_ID" "$CURRENT_MODULE_SOURCE"
+    else
+      local zip_path
+      if zip_path="$(resolve_module_zip)" && install_module_zip "$DEVICE_SERIAL" "$zip_path" "$ROOT_FRAMEWORK"
+      then
+        log_ok "$CURRENT_MODULE_NAME ($CURRENT_MODULE_ID) installed"
+        MODULES_CHANGED_COUNT=$((MODULES_CHANGED_COUNT + 1))
+      else
+        rc=1
+      fi
+    fi
+  fi
+
+  if [[ $rc -eq 0 ]]
+  then
+    sync_module_disabled_state || rc=$?
   fi
 
   return "$rc"
+}
+
+# See install_module_app's comment -- same convention, source/repo/asset/
+# url/path are unused here (uninstalling doesn't care where the module
+# came from). Reads CURRENT_MODULE_ID/CURRENT_MODULE_NAME/DEVICE_SERIAL/
+# DRY_RUN like uninstall_app's own equivalents.
+uninstall_module_app() {
+  if ! is_module_installed "$DEVICE_SERIAL" "$CURRENT_MODULE_ID"
+  then
+    log_skip "$CURRENT_MODULE_NAME ($CURRENT_MODULE_ID) not installed"
+    return 0
+  fi
+
+  log_step "Uninstalling module $CURRENT_MODULE_NAME ($CURRENT_MODULE_ID)"
+
+  if [[ -n "$DRY_RUN" ]]
+  then
+    printf '  would uninstall module %s\n' "$CURRENT_MODULE_ID"
+    return 0
+  fi
+
+  if uninstall_module "$DEVICE_SERIAL" "$CURRENT_MODULE_ID"
+  then
+    log_ok "$CURRENT_MODULE_NAME ($CURRENT_MODULE_ID) uninstalled"
+    MODULES_CHANGED_COUNT=$((MODULES_CHANGED_COUNT + 1))
+  else
+    log_error "$CURRENT_MODULE_NAME ($CURRENT_MODULE_ID) failed to uninstall"
+    return 1
+  fi
 }
 
 # Same idea as build_install_plan, but for modules -- see its comment.
@@ -2039,12 +2190,17 @@ build_module_plan() {
   local -a rows
   mapfile -t rows < <(module_rows "$config")
 
-  local row id name source rest
+  local row id name source _repo _asset _url _path state_installed _state_disabled
   for row in "${rows[@]}"
   do
     # See for_each_module's comment on the same guard.
     [[ -z "$row" ]] && continue
-    IFS="$ROW_SEP" read -r id name source rest <<< "$row"
+    IFS="$ROW_SEP" read -r id name source _repo _asset _url _path state_installed _state_disabled <<< "$row"
+
+    # See build_install_plan's identical guard -- state.installed: false
+    # modules are handled by build_module_removal_plan instead, never a
+    # pending install nor a skip-count here.
+    [[ "$state_installed" == false ]] && continue
 
     if is_module_installed "$DEVICE_SERIAL" "$id"
     then
@@ -2073,6 +2229,44 @@ print_module_plan() {
     do
       IFS=$'\t' read -r name id source <<< "$p"
       printf '  %s (%s) [%s%s%s]\n' "$name" "$id" "$C_CYAN" "$source" "$C_RESET"
+    done
+  } >&2
+}
+
+# Same idea as build_removal_plan, but for modules -- see its comment.
+build_module_removal_plan() {
+  local config="$1"
+  MODULE_REMOVAL_PLAN_PENDING=()
+
+  local -a rows
+  mapfile -t rows < <(module_rows "$config")
+
+  local row id name _source _repo _asset _url _path state_installed _state_disabled
+  for row in "${rows[@]}"
+  do
+    [[ -z "$row" ]] && continue
+    IFS="$ROW_SEP" read -r id name _source _repo _asset _url _path state_installed _state_disabled <<< "$row"
+
+    if [[ "$state_installed" == false ]] && is_module_installed "$DEVICE_SERIAL" "$id"
+    then
+      MODULE_REMOVAL_PLAN_PENDING+=("$name"$'\t'"$id")
+    fi
+  done
+}
+
+# Same idea as print_removal_plan, but for modules -- see its comment.
+print_module_removal_plan() {
+  local device="$1"
+  local p name id
+
+  {
+    printf '%sModule removal plan for %s:%s %d module(s) marked state.installed: false but still present\n' \
+      "$C_BOLD" "$device" "$C_RESET" "${#MODULE_REMOVAL_PLAN_PENDING[@]}"
+
+    for p in "${MODULE_REMOVAL_PLAN_PENDING[@]}"
+    do
+      IFS=$'\t' read -r name id <<< "$p"
+      printf '  %s (%s)\n' "$name" "$id"
     done
   } >&2
 }
@@ -3062,18 +3256,28 @@ cmd_apply() {
   config_has_conditions "$config" && check_deps jq
 
   local DEVICE_SERIAL TARGET_USER ROOT_FRAMEWORK overall_rc=0
-  local -a PLAN_PENDING MODULE_PLAN_PENDING REMOVAL_PLAN_PENDING
-  local PLAN_SKIP_COUNT MODULE_PLAN_SKIP_COUNT MODULES_INSTALLED_COUNT=0
+  local -a PLAN_PENDING MODULE_PLAN_PENDING REMOVAL_PLAN_PENDING MODULE_REMOVAL_PLAN_PENDING
+  local PLAN_SKIP_COUNT MODULE_PLAN_SKIP_COUNT MODULES_CHANGED_COUNT=0
   local device_config
-  # Tracks which of this run's devices actually got a module installed,
-  # so --reboot only reboots those -- MODULES_INSTALLED_COUNT itself is a
-  # run-wide total (still used below for the reminder message printed
-  # when --reboot isn't passed), not per-device, so rebooting "every
-  # device in $devices whenever the total is nonzero" would reboot
-  # devices that had nothing to do with the install(s) under
-  # --bulk/--all-devices.
+  # Tracks which of this run's devices actually had a module install/
+  # removal/enable/disable, so --reboot only reboots those --
+  # MODULES_CHANGED_COUNT itself is a run-wide total (still used below for
+  # the reminder message printed when --reboot isn't passed), not
+  # per-device, so rebooting "every device in $devices whenever the total
+  # is nonzero" would reboot devices that had nothing to do with the
+  # change(s) under --bulk/--all-devices. Named *_CHANGED, not
+  # *_INSTALLED, since a reboot is needed for every module state change
+  # (install, removal, enable, disable), not just a fresh install -- see
+  # each of install_module_app/uninstall_module_app/
+  # sync_module_disabled_state/enforce_modules incrementing it.
   local -a DEVICES_NEEDING_REBOOT=()
-  local device_modules_installed_before
+  local device_modules_changed_before
+  # Set once root actually resolves for a device this iteration (inside
+  # the module-handling block below) -- lets the later --enforce block
+  # reuse that same $ROOT_FRAMEWORK for enforce_modules instead of
+  # re-probing the device a second time, and skip module enforcement
+  # entirely for a device root doesn't apply to at all.
+  local module_root_resolved
   for DEVICE_SERIAL in "${devices[@]}"
   do
     log_step "Target device: $DEVICE_SERIAL"
@@ -3160,47 +3364,91 @@ cmd_apply() {
       fi
     fi
 
-    if [[ ${#configured_module_ids[@]} -gt 0 ]]
-    then
-      device_modules_installed_before="$MODULES_INSTALLED_COUNT"
+    device_modules_changed_before="$MODULES_CHANGED_COUNT"
+    module_root_resolved=""
 
+    # Root gets resolved (and module install/removal attempted) whenever
+    # either this device has any modules: configured at all, OR --enforce
+    # is active -- the latter needs it too, since enforce_modules below
+    # must be able to find/remove a module even on a device with zero
+    # modules: entries left (e.g. every configured module for this device
+    # was just migrated/removed, exactly the scenario that motivated
+    # this).
+    if [[ ${#configured_module_ids[@]} -gt 0 || -n "$enforce" ]]
+    then
       if ! ROOT_FRAMEWORK="$(resolve_root_framework "$device_config" "$cli_root_framework" "$DEVICE_SERIAL")"
       then
-        log_ok "Root not enabled/detected on $DEVICE_SERIAL, skipping configured module(s)"
+        [[ ${#configured_module_ids[@]} -gt 0 ]] && log_ok "Root not enabled/detected on $DEVICE_SERIAL, skipping configured module(s)"
       else
-        build_module_plan "$device_config"
+        module_root_resolved=1
 
-        if [[ ${#MODULE_PLAN_PENDING[@]} -eq 0 ]]
+        if [[ ${#configured_module_ids[@]} -gt 0 ]]
         then
-          log_ok "Nothing to install on $DEVICE_SERIAL ($MODULE_PLAN_SKIP_COUNT module(s) already installed)"
-        else
-          print_module_plan "$DEVICE_SERIAL"
+          build_module_plan "$device_config"
 
-          local module_proceed=1
-          if [[ -z "$DRY_RUN" && -z "$assume_yes" ]]
+          if [[ ${#MODULE_PLAN_PENDING[@]} -eq 0 ]]
           then
-            local module_reply
-            read -rp "Install these ${#MODULE_PLAN_PENDING[@]} module(s) on $DEVICE_SERIAL? [y/N] " module_reply
-            case "$module_reply" in
-              y|Y|yes|YES)
-                ;;
-              *)
-                log_step "Skipping module install on $DEVICE_SERIAL"
-                module_proceed=""
-                ;;
-            esac
+            log_ok "Nothing to install on $DEVICE_SERIAL ($MODULE_PLAN_SKIP_COUNT module(s) already installed)"
+          else
+            print_module_plan "$DEVICE_SERIAL"
+
+            local module_proceed=1
+            if [[ -z "$DRY_RUN" && -z "$assume_yes" ]]
+            then
+              local module_reply
+              read -rp "Install these ${#MODULE_PLAN_PENDING[@]} module(s) on $DEVICE_SERIAL? [y/N] " module_reply
+              case "$module_reply" in
+                y|Y|yes|YES)
+                  ;;
+                *)
+                  log_step "Skipping module install on $DEVICE_SERIAL"
+                  module_proceed=""
+                  ;;
+              esac
+            fi
+
+            if [[ -n "$module_proceed" ]] && ! for_each_module "$device_config" install_module_app
+            then
+              overall_rc=1
+            fi
           fi
 
-          if [[ -n "$module_proceed" ]] && ! for_each_module "$device_config" install_module_app
+          build_module_removal_plan "$device_config"
+
+          if [[ ${#MODULE_REMOVAL_PLAN_PENDING[@]} -gt 0 ]]
           then
-            overall_rc=1
+            print_module_removal_plan "$DEVICE_SERIAL"
+
+            local module_removal_proceed=1
+            if [[ -z "$DRY_RUN" && -z "$assume_yes" ]]
+            then
+              local module_removal_reply
+              read -rp "Uninstall these ${#MODULE_REMOVAL_PLAN_PENDING[@]} module(s) on $DEVICE_SERIAL? [y/N] " module_removal_reply
+              case "$module_removal_reply" in
+                y|Y|yes|YES)
+                  ;;
+                *)
+                  log_step "Skipping module removal on $DEVICE_SERIAL"
+                  module_removal_proceed=""
+                  ;;
+              esac
+            fi
+
+            if [[ -n "$module_removal_proceed" ]]
+            then
+              local module_removal_row
+              for module_removal_row in "${MODULE_REMOVAL_PLAN_PENDING[@]}"
+              do
+                IFS=$'\t' read -r CURRENT_MODULE_NAME CURRENT_MODULE_ID <<< "$module_removal_row"
+
+                if ! uninstall_module_app
+                then
+                  overall_rc=1
+                fi
+              done
+            fi
           fi
         fi
-      fi
-
-      if [[ "$MODULES_INSTALLED_COUNT" -gt "$device_modules_installed_before" ]]
-      then
-        DEVICES_NEEDING_REBOOT+=("$DEVICE_SERIAL")
       fi
     fi
 
@@ -3209,15 +3457,33 @@ cmd_apply() {
       overall_rc=1
     fi
 
-    if [[ -n "$enforce" ]] && ! enforce_config "$device_config" "$DEVICE_SERIAL" "$DRY_RUN" "$assume_yes"
+    if [[ -n "$enforce" ]]
     then
-      overall_rc=1
+      if ! enforce_config "$device_config" "$DEVICE_SERIAL" "$DRY_RUN" "$assume_yes"
+      then
+        overall_rc=1
+      fi
+
+      if [[ -n "$module_root_resolved" ]] && ! enforce_modules "$device_config" "$DEVICE_SERIAL" "$ROOT_FRAMEWORK" "$DRY_RUN" "$assume_yes"
+      then
+        overall_rc=1
+      fi
+    fi
+
+    # Checked once at the very end of this device's own iteration, after
+    # every module-affecting step (install, removal, enable/disable
+    # convergence, --enforce cleanup) has had its chance to run --
+    # anything earlier would miss a change made by a later step in the
+    # same iteration.
+    if [[ "$MODULES_CHANGED_COUNT" -gt "$device_modules_changed_before" ]]
+    then
+      DEVICES_NEEDING_REBOOT+=("$DEVICE_SERIAL")
     fi
 
     [[ "$device_config" != "$config" ]] && rm -f "$device_config"
   done
 
-  if [[ "$MODULES_INSTALLED_COUNT" -gt 0 ]]
+  if [[ "$MODULES_CHANGED_COUNT" -gt 0 ]]
   then
     if [[ -n "$do_reboot" ]]
     then
@@ -3233,7 +3499,7 @@ cmd_apply() {
         fi
       done
     else
-      log_warn "$MODULES_INSTALLED_COUNT module(s) installed -- reboot the device(s) for changes to take effect (or pass --reboot)"
+      log_warn "$MODULES_CHANGED_COUNT module(s) changed -- reboot the device(s) for changes to take effect (or pass --reboot)"
     fi
   fi
 
@@ -3298,6 +3564,79 @@ enforce_config() {
       log_ok "$pkg uninstalled"
     else
       log_error "$pkg failed to uninstall"
+      failures=$((failures + 1))
+    fi
+  done
+
+  if [[ $failures -gt 0 ]]
+  then
+    return 1
+  fi
+}
+
+# `apply --enforce`'s module-side counterpart to enforce_config -- same
+# structure, prompt, and --dry-run/-y handling, just against
+# list_extra_modules/uninstall_module instead of list_extra_pkgs/plain
+# `adb uninstall`. Only ever called once ROOT_FRAMEWORK has actually
+# resolved for this device (see cmd_apply) -- there's nothing to enforce
+# against a device with no root modules support at all. Increments
+# MODULES_CHANGED_COUNT on every successful removal, same reboot-required
+# accounting as install/uninstall/enable/disable elsewhere.
+enforce_modules() {
+  local config="$1"
+  local device="$2"
+  local framework="$3"
+  local dry_run="$4"
+  local assume_yes="$5"
+
+  local -a extra_rows
+  mapfile -t extra_rows < <(list_extra_modules "$config" "$device" "$framework")
+
+  if [[ ${#extra_rows[@]} -eq 0 ]]
+  then
+    log_ok "No unconfigured modules found on $device"
+    return 0
+  fi
+
+  log_step "Found ${#extra_rows[@]} unconfigured module(s) on $device:"
+  local row id name
+  for row in "${extra_rows[@]}"
+  do
+    IFS=$'\t' read -r id name <<< "$row"
+    printf '  %s (%s)\n' "$name" "$id" >&2
+  done
+
+  if [[ -n "$dry_run" ]]
+  then
+    printf '  would uninstall %d module(s)\n' "${#extra_rows[@]}"
+    return 0
+  fi
+
+  if [[ -z "$assume_yes" ]]
+  then
+    local reply
+    read -rp "Uninstall these ${#extra_rows[@]} module(s) from $device? [y/N] " reply
+    case "$reply" in
+      y|Y|yes|YES)
+        ;;
+      *)
+        log_step "Skipping module enforcement on $device"
+        return 0
+        ;;
+    esac
+  fi
+
+  local failures=0
+  for row in "${extra_rows[@]}"
+  do
+    IFS=$'\t' read -r id name <<< "$row"
+    log_step "Uninstalling module $name ($id)"
+    if uninstall_module "$device" "$id"
+    then
+      log_ok "$name ($id) uninstalled"
+      MODULES_CHANGED_COUNT=$((MODULES_CHANGED_COUNT + 1))
+    else
+      log_error "$name ($id) failed to uninstall"
       failures=$((failures + 1))
     fi
   done
@@ -4501,6 +4840,44 @@ list_extra_pkgs() {
   done
 }
 
+# Same idea as list_extra_pkgs, but for root modules: every module
+# actually present on the device (list_root_modules) with no matching
+# `id:` entry in the config. No is_system_plumbing_pkg-equivalent denylist
+# needed here -- unlike apps, there's no such thing as a preinstalled OEM
+# module, every module dir on a rooted device only got there because
+# someone (declaroid or otherwise) installed it. Prints id\tname rows (name
+# from the device's own module.prop, not the config -- there's no config
+# entry for an extra module by definition); no output means nothing extra.
+# Shared by `modules --full` (surfaces them, already did before this) and
+# `apply --enforce` (offers to uninstall them, new).
+list_extra_modules() {
+  local config="$1"
+  local device="$2"
+  local framework="$3"
+
+  local -a configured_ids
+  mapfile -t configured_ids < <(yq -r '(.modules // [])[].id' "$config")
+
+  local -A configured=()
+  local id
+  for id in "${configured_ids[@]}"
+  do
+    configured["$id"]=1
+  done
+
+  local -a device_rows
+  mapfile -t device_rows < <(list_root_modules "$device" "$framework")
+
+  local row did dname _dversion _denabled
+  for row in "${device_rows[@]}"
+  do
+    IFS=$'\t' read -r did dname _dversion _denabled <<< "$row"
+    [[ -n "${configured[$did]:-}" ]] && continue
+
+    printf '%s\t%s\n' "$did" "$dname"
+  done
+}
+
 cmd_diff() {
   local -a orig_args=("$@")
   local config="$DEFAULT_CONFIG"
@@ -4648,11 +5025,12 @@ cmd_diff() {
 # / Magisk modules -- same on-disk convention, one command covers either)
 # instead of apps: shows each configured module's install/enabled state on
 # the device, `--full` also lists installed-but-unconfigured modules as
-# "extra". Does not install/enable/disable/uninstall anything -- that's
-# deliberately out of scope for now (see AGENTS.md for why: module state
-# changes only take effect on next boot for both frameworks, and APatch's
-# own `module install` has a documented CLI-only failure mode the GUI
-# doesn't hit, neither of which this codebase has a good answer for yet).
+# "extra". This command itself never installs/enables/disables/uninstalls
+# anything -- it's drift reporting only, exactly like cmd_diff is for
+# apps. `apply` is where all of that actually happens now (install,
+# state.installed:/state.disabled: convergence, `--enforce` removal of
+# unconfigured modules) -- see install_module_app/sync_module_disabled_state/
+# enforce_modules.
 cmd_modules() {
   local -a orig_args=("$@")
   local config="$DEFAULT_CONFIG"

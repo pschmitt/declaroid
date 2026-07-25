@@ -530,19 +530,37 @@ Tricky Store                  tricky_store      v1.4.1           yes      instal
 
 `--full` also lists installed-but-unconfigured modules as `extra`, same as
 `diff --full` does for apps. `modules` itself never installs/enables/
-disables/uninstalls anything -- it's read-only drift reporting. To
-actually install a missing module, run `apply`: it fetches and installs
-any configured module that isn't already present, the same way it does
-for apps (a plan first, then a confirmation prompt, skippable with
-`-y`/`--yes`/`--noconfirm`/`--no-confirm`, previewable with `--dry-run`).
-**declaroid never enables/disables/uninstalls a module, and module state
-changes only take effect on next boot for both frameworks** -- it doesn't
-reboot the device for you either, so a `WRN ... reboot the device(s) for
-changes to take effect` reminder is printed instead after any module
-install. Pass `--reboot` to turn that reminder into an actual reboot once
-the run finishes -- only of the device(s) that actually had a module
-installed this run, not every device `--bulk`/`--all-devices` targeted
-(a no-op if none did).
+disables/uninstalls anything -- it's read-only drift reporting, exactly
+like `diff` is for apps. All of that lives in `apply` instead, the same
+split apps already have:
+
+- Installs any configured module that isn't already present (a plan
+  first, then a confirmation prompt, skippable with
+  `-y`/`--yes`/`--noconfirm`/`--no-confirm`, previewable with `--dry-run`).
+- Converges `state.disabled:` by touching/removing the module's own
+  `disable` marker file (`/data/adb/modules/<id>/disable`) -- present to
+  disable, absent to enable, checked/changed even for an
+  already-installed module, not just a freshly-installed one (same
+  "install it, then disable" reasoning apps' `state.disabled:` uses).
+- `state.installed: false` uninstalls it (own plan+confirm step, same as
+  apps) by touching its `remove` marker file
+  (`/data/adb/modules/<id>/remove`) -- the actual directory deletion is
+  Magisk/APatch's own job, done during next boot, not something declaroid
+  does directly (an outright `rm -rf` against a mounted module isn't
+  safe, and isn't how either framework expects removal to happen).
+- `apply --enforce` also uninstalls (same `remove` marker) any
+  device-installed module with no matching `id:` entry anywhere in the
+  config, the same "anything undeclared" semantics `--enforce` already
+  has for apps.
+
+**Every module state change -- install, removal, enable, disable -- only
+takes effect on next boot for both frameworks**: `apply` doesn't reboot
+the device for you either, so a `WRN ... module(s) changed -- reboot the
+device(s) for changes to take effect` reminder is printed instead. Pass
+`--reboot` to turn that reminder into an actual reboot once the run
+finishes -- only of the device(s) that actually had a module change this
+run, not every device `--bulk`/`--all-devices` targeted (a no-op if none
+did).
 
 Config schema:
 
@@ -566,7 +584,13 @@ modules:
                                   # as apps' asset: (see below)
     url: <http(s) URL>            # required when source is url
     path: <file, glob, or dir>     # required when source is local
-    enabled: false                 # optional, informational only for now
+    state:
+      installed: false             # optional; uninstall (remove marker) if
+                                     # present, skip installing if not -- same
+                                     # semantics as apps' state.installed:
+      disabled: true                # optional; disable (marker file) if
+                                      # installed -- same semantics as apps'
+                                      # state.disabled:
 ```
 
 Framework detection (when `root.framework` isn't set) probes the device
@@ -593,7 +617,7 @@ INF Using latest release for KOWX712/PlayIntegrityFix
 INF Downloading PlayIntegrityFix_v4.7-1-inject-s.zip
 OK Play Integrity Fix [INJECT] (playintegrityfix) installed
 OK All modules processed successfully
-WRN 1 module(s) installed -- reboot the device(s) for changes to take effect
+WRN 1 module(s) changed -- reboot the device(s) for changes to take effect
 ```
 
 ### `obtainium:` -- tracking repos in the Obtainium app
@@ -995,7 +1019,11 @@ is given.
 same "extra" apps `diff --full` would report and offers to uninstall them,
 prompting once for the whole batch (not once per app). Skip the prompt with
 `-y`/`--yes`/`--noconfirm`/`--no-confirm`, or preview it without uninstalling
-anything via `--dry-run`.
+anything via `--dry-run`. Root modules get the same treatment: any
+device-installed module with no matching `id:` anywhere in the config is
+offered for removal too (its own separate prompt from the apps one), on
+any device root actually resolves for -- see
+[Root modules](#root-modules-apatchmagisk).
 
 Set `enforce: true` at the top level of the config to make this the default
 for that device/config, instead of having to pass `--enforce` every time:

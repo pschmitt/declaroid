@@ -1,0 +1,10 @@
+modules:
+  - id: unwanted-module
+    repo: example/unwanted
+    state:
+      installed: false
+
+  - id: disabled-module
+    repo: example/disabled
+    state:
+      disabled: true

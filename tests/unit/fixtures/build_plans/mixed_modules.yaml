@@ -1,0 +1,16 @@
+modules:
+  - id: pending-module
+    repo: example/pending
+
+  - id: installed-module
+    repo: example/installed
+
+  - id: remove-module
+    repo: example/remove
+    state:
+      installed: false
+
+  - id: already-gone-module
+    repo: example/gone
+    state:
+      installed: false
