@@ -99,3 +99,51 @@ setup() {
   [ "${lines[1]}" = "com.example.shared" ]
   [ "${lines[2]}" = "com.example.device" ]
 }
+
+@test "resolve_config: a meta-config's scalar (via META_CONFIG_SCALAR_SOURCE) is inherited when the leaf has no imports: of its own" {
+  # Also regresses the no-imports fast path: without extending its guard to
+  # check META_CONFIG_SCALAR_SOURCE too, resolve_config would return the
+  # leaf unchanged before ever reaching the scalar_key loop.
+  # Read dynamically by resolve_config itself (dynamic-scope, same
+  # convention as DEVICE_SERIAL in build_plans.bats -- see its comment);
+  # static analysis can't see the sourced production function that reads
+  # it.
+  # shellcheck disable=SC2034
+  META_CONFIG_SCALAR_SOURCE="$(fixture resolve_config/meta_enforce_true.yaml)"
+
+  run resolve_config "$(fixture resolve_config/leaf_no_imports.yaml)"
+  [ "$status" -eq 0 ]
+
+  run yq -r '.enforce' "$output"
+  [ "$output" = "true" ]
+}
+
+@test "resolve_config: a leaf's own imports: still win over a meta-config's scalar" {
+  # device_inherits_scalars.yaml imports base.yaml (enforce: true) and sets
+  # no enforce: of its own -- the meta source below deliberately disagrees
+  # (enforce: false) so a naive "meta always wins" implementation would be
+  # caught here.
+  # shellcheck disable=SC2034
+  META_CONFIG_SCALAR_SOURCE="$(fixture resolve_config/meta_enforce_false.yaml)"
+
+  run resolve_config "$(fixture resolve_config/device_inherits_scalars.yaml)"
+  [ "$status" -eq 0 ]
+
+  run yq -r '.enforce' "$output"
+  [ "$output" = "true" ]
+}
+
+@test "resolve_config: a leaf's own top-level scalar still wins over a meta-config's" {
+  # own_enforce_false.yaml sets enforce: false itself (and also imports
+  # base.yaml, which sets enforce: true, already covered by the device's-
+  # own-value-wins test above) -- the meta source here deliberately
+  # disagrees with both.
+  # shellcheck disable=SC2034
+  META_CONFIG_SCALAR_SOURCE="$(fixture resolve_config/meta_enforce_true.yaml)"
+
+  run resolve_config "$(fixture resolve_config/own_enforce_false.yaml)"
+  [ "$status" -eq 0 ]
+
+  run yq -r '.enforce' "$output"
+  [ "$output" = "false" ]
+}

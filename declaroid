@@ -745,24 +745,51 @@ device_props_json() {
 }
 
 # Recursively evaluates an app/module's `if:` block (or {}/absent, which
-# always matches -- nothing to require) against $props_json (see
-# device_props_json). Every key in a condition map is ANDed together;
-# `not` negates its own nested condition, `or` is true if any condition in
-# its list is true, and every other key is compared against that getprop
-# name for an exact string match. `not`/`or` may themselves be nested
-# arbitrarily deep, and may appear alongside plain getprop keys in the same
-# map (still ANDed with them) -- e.g. `{a: x, not: {b: y}}` means `a == x
-# AND NOT (b == y)`.
+# always matches -- nothing to require) against $props_json (device
+# getprops, see device_props_json) and $config_json (the resolved device
+# config itself, as JSON -- defaults to `{}` for callers that don't pass
+# one, e.g. every pre-existing test/call site that only ever used getprop
+# conditions). Every key in a condition map is ANDed together; `not`
+# negates its own nested condition, `or` is true if any condition in its
+# list is true. `not`/`or` may themselves be nested arbitrarily deep, and
+# may appear alongside other keys in the same map (still ANDed with them)
+# -- e.g. `{a: x, not: {b: y}}` means `a == x AND NOT (b == y)`.
+#
+# Every other key's own value is either a bare scalar -- shorthand for
+# `{type: prop, value: <scalar>}`, i.e. "compare against the device
+# getprop of this same name" (the only kind conditions supported before
+# this comment, so every pre-existing config keeps meaning exactly what it
+# always did with zero changes) -- or an explicit `{type: ..., value:
+# ...}` object. `type: config` reads the key as a dotted path into
+# $config_json instead of a getprop name (`root.framework` ->
+# `.root.framework`, arbitrarily nested, works for any key the resolved
+# config itself has -- device/adb/root/profile/enforce/store/whatever),
+# which is how e.g. `if: {root.framework: {type: config, value: magisk}}`
+# gates an app/module on the device's own configured root framework rather
+# than a hardware property. `type: prop` is the same explicit spelling of
+# the bare-scalar shorthand, for when you want to write it out. An
+# unrecognized `type:` simply never matches, the same lenient-by-default
+# treatment an unrecognized/mistyped getprop name already gets -- if:
+# blocks were never schema-validated before this and still aren't.
 condition_matches() {
   local cond_json="$1"
   local props_json="$2"
+  local config_json="${3:-{\}}"
 
-  jq -e -n --argjson cond "$cond_json" --argjson props "$props_json" '
+  jq -e -n --argjson cond "$cond_json" --argjson props "$props_json" --argjson cfg "$config_json" '
     def matches(cond):
       cond | to_entries | all(
         .key as $k | .value as $v |
         if $k == "not" then (matches($v) | not)
         elif $k == "or" then ($v | any(.[]; matches(.)))
+        elif ($v | type) == "object" then
+          (
+            ($v.type // "prop") as $t |
+            if $t == "config" then ($cfg | getpath($k / ".")) == $v.value
+            elif $t == "prop" then ($props[$k] == $v.value)
+            else false
+            end
+          )
         else ($props[$k] == $v)
         end
       );
@@ -794,6 +821,16 @@ filter_config_for_device() {
   local props
   props="$(device_props_json "$device")"
 
+  # The resolved config itself, as JSON -- what a `type: config` condition
+  # (see condition_matches' comment) reads its dotted-path key against,
+  # e.g. `root.framework` -> `.root.framework`. Read from $config as
+  # given (already past resolve_config's imports:/scalar-cascade merge by
+  # the time any caller reaches this function), so a `type: config`
+  # condition sees the same effective value everything else downstream
+  # does, not the pre-merge original.
+  local cfg
+  cfg="$(yq -o=json '.' "$config")"
+
   local filtered
   filtered="$(mktemp --suffix=.yaml)"
   cp "$config" "$filtered"
@@ -806,12 +843,20 @@ filter_config_for_device() {
   for key in apps modules
   do
     filtered_json="$(mktemp --suffix=.json)"
-    yq -o=json ".$key // []" "$config" | jq --argjson props "$props" '
+    yq -o=json ".$key // []" "$config" | jq --argjson props "$props" --argjson cfg "$cfg" '
       def matches(cond):
         cond | to_entries | all(
           .key as $k | .value as $v |
           if $k == "not" then (matches($v) | not)
           elif $k == "or" then ($v | any(.[]; matches(.)))
+          elif ($v | type) == "object" then
+            (
+              ($v.type // "prop") as $t |
+              if $t == "config" then ($cfg | getpath($k / ".")) == $v.value
+              elif $t == "prop" then ($props[$k] == $v.value)
+              else false
+              end
+            )
           else ($props[$k] == $v)
           end
         );
@@ -2279,7 +2324,12 @@ resolve_config() {
   local -a IMPORT_FILES=()
   collect_imports "$config" || return 1
 
-  if [[ ${#IMPORT_FILES[@]} -eq 0 ]]
+  # The no-imports fast path only short-circuits when there's also no
+  # meta-config scalar fallback in play (see run_meta_config's
+  # META_CONFIG_SCALAR_SOURCE comment) -- a leaf with no imports: of its
+  # own can still need the scalar_key loop below to pick up e.g. `enforce:
+  # true` from the meta-config that fanned out to it.
+  if [[ ${#IMPORT_FILES[@]} -eq 0 && -z "${META_CONFIG_SCALAR_SOURCE:-}" ]]
   then
     printf '%s\n' "$config"
     return 0
@@ -2341,6 +2391,15 @@ resolve_config() {
   # those stay squarely a per-device concern, never cascaded from an
   # import.
   #
+  # Lowest priority of all: a meta-config's (configs:) own value, via
+  # $META_CONFIG_SCALAR_SOURCE (see run_meta_config's comment) -- checked
+  # only once neither $config itself nor any of its own imports: sets the
+  # key, so a fleet-wide `enforce: true` in a `configs:` meta-config still
+  # loses to a shared imports/base.yaml's own `enforce: false`, which in
+  # turn still loses to the leaf's own top-level value. This is what makes
+  # "enforce: true in the meta-config, enforce: false on one specific
+  # device" work as an actual per-device opt-out.
+  #
   # The value is round-tripped through its own one-line temp file and
   # `load(strenv(...))`, same mechanism as the list-key merge above, not
   # extracted via `yq -r` and spliced back in as bare text -- confirmed
@@ -2349,7 +2408,7 @@ resolve_config() {
   # but breaks for any string value (`.store = gplay` errors out, "invalid
   # input text" -- yq's expression language, unlike YAML itself, has no
   # bare-unquoted-string literal syntax).
-  local scalar_key has_own has_import chosen_file imp_val_file imp
+  local scalar_key has_own has_import has_meta chosen_file imp_val_file imp
   for scalar_key in enforce grant_permissions store obtainium_auto_track
   do
     has_own="$(yq -r "has(\"$scalar_key\")" "$config")"
@@ -2361,6 +2420,13 @@ resolve_config() {
       has_import="$(yq -r "has(\"$scalar_key\")" "$imp")"
       [[ "$has_import" == true ]] && chosen_file="$imp"
     done
+
+    if [[ -z "$chosen_file" && -n "${META_CONFIG_SCALAR_SOURCE:-}" ]]
+    then
+      has_meta="$(yq -r "has(\"$scalar_key\")" "$META_CONFIG_SCALAR_SOURCE")"
+      [[ "$has_meta" == true ]] && chosen_file="$META_CONFIG_SCALAR_SOURCE"
+    fi
+
     [[ -z "$chosen_file" ]] && continue
 
     imp_val_file="$(mktemp --suffix=.yaml)"
@@ -2571,6 +2637,21 @@ strip_config_flag() {
 # device shouldn't block the rest), rolling up a nonzero return if any leaf
 # failed -- the same "keep going, aggregate at the end" convention already
 # used for --bulk's multiple matched devices within a single config.
+#
+# `local META_CONFIG_SCALAR_SOURCE` below is what lets $config carry its
+# own `enforce:`/`grant_permissions:`/`store:`/`obtainium_auto_track:` as a
+# fleet-wide default every leaf inherits unless it (or one of its own
+# imports:) sets that key itself -- e.g. `enforce: true` in this
+# meta-config, with one leaf opting out via its own `enforce: false`. A
+# `local` here, not passed as a parameter, is deliberate: same dynamic-
+# scope convention as DRY_RUN/GRANT_PERMISSIONS/TARGET_USER elsewhere in
+# this file -- it stays visible all the way down through `"$fn"` into
+# resolve_config's own scalar_key loop (see its comment) with no explicit
+# threading needed. Only the top-level $config passed to *this* call ever
+# becomes that source, even when configs: nests another meta-config inside
+# it (expand_meta_configs flattens that recursively before this loop ever
+# runs) -- a nested meta-config's own scalar keys, if it set any, are not
+# considered; a known limitation, not an oversight.
 run_meta_config() {
   local fn="$1"
   local config="$2"
@@ -2585,6 +2666,8 @@ run_meta_config() {
     log_error "$config: configs: cannot be combined with apps:/device: in the same file"
     return 2
   fi
+
+  local META_CONFIG_SCALAR_SOURCE="$config"
 
   local -a leaf_configs
   mapfile -t leaf_configs < <(expand_meta_configs "$config") || return 2

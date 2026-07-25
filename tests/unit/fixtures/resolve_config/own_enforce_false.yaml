@@ -1,0 +1,8 @@
+imports:
+  - base.yaml
+
+enforce: false
+
+apps:
+  - name: Device App
+    pkg: com.example.device

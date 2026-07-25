@@ -83,6 +83,45 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
+@test "condition_matches: type: config reads a dotted path from config_json instead of a getprop" {
+  local cfg='{"root":{"framework":"magisk"}}'
+  run condition_matches '{"root.framework":{"type":"config","value":"magisk"}}' '{}' "$cfg"
+  [ "$status" -eq 0 ]
+  run condition_matches '{"root.framework":{"type":"config","value":"apatch"}}' '{}' "$cfg"
+  [ "$status" -eq 1 ]
+}
+
+@test "condition_matches: type: prop is an explicit spelling of the bare-scalar shorthand" {
+  local props='{"ro.product.device":"clover"}'
+  run condition_matches '{"ro.product.device":{"type":"prop","value":"clover"}}' "$props"
+  [ "$status" -eq 0 ]
+  run condition_matches '{"ro.product.device":{"type":"prop","value":"redfin"}}' "$props"
+  [ "$status" -eq 1 ]
+}
+
+@test "condition_matches: an unrecognized type: never matches" {
+  run condition_matches '{"root.framework":{"type":"cofnig","value":"magisk"}}' '{}' '{"root":{"framework":"magisk"}}'
+  [ "$status" -eq 1 ]
+}
+
+@test "filter_config_for_device: type: config filters on the device's own configured root.framework, not a getprop" {
+  # getprop is still called once (config_has_conditions is file-wide, not
+  # per-entry) but its value is irrelevant here -- every if: in this
+  # fixture is type: config, none reference a getprop at all.
+  # shellcheck disable=SC2329
+  adb() {
+    [[ "$*" == *"shell getprop"* ]] && printf '[ro.product.device]: [irrelevant]\n'
+  }
+
+  run filter_config_for_device "$(fixture conditions/config_condition.yaml)" fake-magisk-device
+  [ "$status" -eq 0 ]
+
+  run yq -r '.apps[].name' "$output"
+  [ "${lines[0]}" = "WebUI X" ]
+  [ "${lines[1]}" = "Always" ]
+  [ "${#lines[@]}" -eq 2 ]
+}
+
 @test "filter_config_for_device: no if: anywhere returns the config unchanged, no adb call" {
   # No adb mock at all -- if filter_config_for_device called it despite
   # config_has_conditions being false, the real adb binary would either

@@ -73,6 +73,7 @@ fake_cmd() {
 }
 
 @test "run_meta_config: runs every leaf, forwards extra args, aggregates a failure" {
+  # shellcheck disable=SC2030
   FAKE_CMD_LOG="$BATS_TEST_TMPDIR/fake_cmd.log"
   : > "$FAKE_CMD_LOG"
   export FAKE_CMD_LOG
@@ -85,6 +86,44 @@ fake_cmd() {
   [ "${#calls[@]}" -eq 2 ]
   [[ "${calls[0]}" == "-c "*"leaf_a.yaml -y --enforce" ]]
   [[ "${calls[1]}" == "-c "*"leaf_b.yaml -y --enforce" ]]
+}
+
+# A second stand-in, this one asserting META_CONFIG_SCALAR_SOURCE (see
+# run_meta_config's comment) is actually visible -- dynamic scope, not an
+# explicit parameter -- inside every leaf call, and holds the *meta*
+# config's own path, not the leaf's. FAKE_CMD_LOG is read back from disk
+# via mapfile below, not the shell variable itself, so shellcheck's
+# subshell-staleness worry (SC2031) doesn't apply here -- same false
+# positive as fake_cmd above, just newly triggered by this second
+# assignment existing in the same file (shellcheck analyzes the whole
+# file as one scope; each @test only actually runs in its own bats
+# subprocess).
+# shellcheck disable=SC2031
+fake_cmd_records_meta_source() {
+  printf '%s\t%s\n' "$*" "${META_CONFIG_SCALAR_SOURCE:-<unset>}" >> "$FAKE_CMD_LOG"
+}
+
+@test "run_meta_config: META_CONFIG_SCALAR_SOURCE is visible to every leaf call and holds the meta-config's own path" {
+  # shellcheck disable=SC2030
+  FAKE_CMD_LOG="$BATS_TEST_TMPDIR/fake_cmd.log"
+  : > "$FAKE_CMD_LOG"
+  export FAKE_CMD_LOG
+
+  local meta
+  meta="$(fixture meta_configs/meta.yaml)"
+
+  run run_meta_config fake_cmd_records_meta_source "$meta"
+  [ "$status" -eq 0 ]
+
+  local -a calls
+  mapfile -t calls < "$FAKE_CMD_LOG"
+  [ "${#calls[@]}" -eq 2 ]
+
+  local call_a_source call_b_source
+  call_a_source="${calls[0]#*$'\t'}"
+  call_b_source="${calls[1]#*$'\t'}"
+  [ "$call_a_source" = "$meta" ]
+  [ "$call_b_source" = "$meta" ]
 }
 
 @test "strip_config_flag: removes -c/--config VALUE and keeps everything else" {

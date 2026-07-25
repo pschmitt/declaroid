@@ -384,6 +384,38 @@ invocation, not once per leaf -- even if several leaves configure `store:
 fdroid`/`store: izzyondroid` apps, only the first one triggers `fdroidcl
 update`/the IzzyOnDroid equivalent; the rest reuse that same refresh.
 
+A meta-config *is* allowed to set `enforce:`/`grant_permissions:`/
+`store:`/`obtainium_auto_track:` itself -- the same four scalars
+`imports:` already cascades (see above) -- as a fleet-wide default every
+listed config inherits unless it (or one of its own `imports:`) sets that
+key itself:
+
+```yaml
+# all.yaml
+enforce: true
+configs:
+  - px5.yaml
+  - zf10.yaml
+  - mp4.yaml
+```
+
+```yaml
+# zf10.yaml -- opts out of the fleet-wide enforce: true above
+enforce: false
+imports:
+  - imports/adb.yaml
+  - imports/apps.yaml
+  # ...
+```
+
+Priority, highest first: the leaf's own top-level value, then the last of
+its own `imports:` that sets the key, then the meta-config's value --
+so `zf10.yaml`'s own `enforce: false` above wins regardless of what
+`all.yaml` or anything `zf10.yaml` imports says. Only the meta-config you
+actually pointed `--config`/`$DECLAROID_CONFIG` at is considered, even
+when one of its `configs:` entries is itself another meta-config -- a
+nested meta-config's own scalar keys are not cascaded.
+
 ### Device matching
 
 Declaroid resolves a target device in this order: `--device`,
@@ -1059,8 +1091,9 @@ apps:
 
 A `<condition>` is a map of `getprop` property name to its exact expected
 value (as reported by `adb shell getprop`, e.g. `ro.product.device`,
-`ro.build.characteristics`); multiple keys AND together. Two keys are
-special rather than getprop names:
+`ro.build.characteristics`) -- or, via `type: config` (below), to a value
+read from the config itself instead of a getprop; multiple keys AND
+together. Two keys are special rather than condition names:
 
 - **`not:`** negates its own nested `<condition>`.
 - **`or:`** is true if *any* `<condition>` in its list is true.
@@ -1081,6 +1114,39 @@ round trip (not one per property, not one per `if:`-gated entry) and reused
 for every conditional entry in that run. A config with no `if:` anywhere
 (every config that predates this feature) pays no cost for this at all: no
 extra adb call, no rewritten copy, nothing.
+
+#### `type: config` -- conditioning on the config itself, not a getprop
+
+A bare `key: value` is shorthand for `key: {type: prop, value: value}` --
+"compare against the device getprop named `key`", the only kind there was
+before this. Writing the object form explicitly with `type: config`
+instead reads `key` as a dotted path into the *resolved device config*
+itself (`imports:`/meta-config scalar-cascade already applied -- the same
+effective value everything else uses) rather than a getprop -- any key the
+config has, arbitrarily nested: `root.framework`, `root.enabled`,
+`adb.start_cmd`, `store`, whatever.
+
+```yaml
+# imports/root.yaml -- only makes sense alongside Magisk, not APatch
+apps:
+  - name: "WebUI X"
+    pkg: com.dergoogler.mmrl.wx
+    store: github
+    repo: MMRLApp/WebUI-X-Portable
+    asset: 'official\.apk$'
+    if:
+      root.framework:
+        type: config
+        value: magisk
+```
+
+This reads the literal YAML value -- it does not invoke `apply`/`modules`'
+own `root.framework` auto-detection (probing the device directly when the
+config doesn't pin one down; see `resolve_root_framework`), so pin
+`root.framework:` explicitly in any device config a `type: config`
+condition needs to see. An unrecognized `type:` (a typo, `type: cofnig`)
+simply never matches -- `if:` blocks aren't schema-validated, the same
+leniency an unrecognized/mistyped getprop name already gets.
 
 ## Shell completion
 

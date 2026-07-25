@@ -1,0 +1,24 @@
+device: test
+root:
+  enabled: true
+  framework: magisk
+
+apps:
+  - name: "WebUI X"
+    pkg: com.dergoogler.mmrl.wx
+    store: github
+    repo: MMRLApp/WebUI-X-Portable
+    if:
+      root.framework:
+        type: config
+        value: magisk
+
+  - name: "APatch-only Companion"
+    pkg: com.example.apatch-companion
+    if:
+      root.framework:
+        type: config
+        value: apatch
+
+  - name: "Always"
+    pkg: com.example.always
