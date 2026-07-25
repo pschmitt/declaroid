@@ -3294,86 +3294,21 @@ cmd_apply() {
       continue
     fi
 
-    build_install_plan "$device_config"
-
-    local proceed=1
-    if [[ ${#PLAN_PENDING[@]} -eq 0 ]]
-    then
-      log_ok "Nothing to install on $DEVICE_SERIAL ($PLAN_SKIP_COUNT already installed)"
-    else
-      print_install_plan "$DEVICE_SERIAL"
-
-      if [[ -z "$DRY_RUN" && -z "$assume_yes" ]]
-      then
-        local reply
-        read -rp "Install these ${#PLAN_PENDING[@]} app(s) on $DEVICE_SERIAL? [y/N] " reply
-        case "$reply" in
-          y|Y|yes|YES)
-            ;;
-          *)
-            log_step "Skipping install on $DEVICE_SERIAL"
-            proceed=""
-            ;;
-        esac
-      fi
-    fi
-
-    # Always runs unless the user explicitly declined the prompt above --
-    # install_app also does the state.disabled: convergence (see its
-    # comment) for every already-installed app, not just newly-installed
-    # ones, so this must run even when PLAN_PENDING is empty (nothing left
-    # to *install*, but there may still be an enable/disable to converge).
-    if [[ -n "$proceed" ]] && ! for_each_app "$device_config" install_app
-    then
-      overall_rc=1
-    fi
-
-    build_removal_plan "$device_config"
-
-    if [[ ${#REMOVAL_PLAN_PENDING[@]} -gt 0 ]]
-    then
-      print_removal_plan "$DEVICE_SERIAL"
-
-      local removal_proceed=1
-      if [[ -z "$DRY_RUN" && -z "$assume_yes" ]]
-      then
-        local removal_reply
-        read -rp "Uninstall these ${#REMOVAL_PLAN_PENDING[@]} app(s) on $DEVICE_SERIAL? [y/N] " removal_reply
-        case "$removal_reply" in
-          y|Y|yes|YES)
-            ;;
-          *)
-            log_step "Skipping removal on $DEVICE_SERIAL"
-            removal_proceed=""
-            ;;
-        esac
-      fi
-
-      if [[ -n "$removal_proceed" ]]
-      then
-        local removal_row
-        for removal_row in "${REMOVAL_PLAN_PENDING[@]}"
-        do
-          IFS=$'\t' read -r CURRENT_NAME CURRENT_PKG <<< "$removal_row"
-
-          if ! uninstall_app
-          then
-            overall_rc=1
-          fi
-        done
-      fi
-    fi
-
     device_modules_changed_before="$MODULES_CHANGED_COUNT"
     module_root_resolved=""
 
-    # Root gets resolved (and module install/removal attempted) whenever
-    # either this device has any modules: configured at all, OR --enforce
-    # is active -- the latter needs it too, since enforce_modules below
-    # must be able to find/remove a module even on a device with zero
-    # modules: entries left (e.g. every configured module for this device
-    # was just migrated/removed, exactly the scenario that motivated
-    # this).
+    # Modules run before apps, deliberately: a root module (Play Integrity
+    # Fix, Specter, etc.) is exactly the kind of thing that changes the
+    # device's attestation/integrity posture, which an app can check as
+    # early as its own install or first launch -- converging root module
+    # state first means apps that care about that never see a stale
+    # posture from this same run. Root gets resolved (and module install/
+    # removal attempted) whenever either this device has any modules:
+    # configured at all, OR --enforce is active -- the latter needs it
+    # too, since enforce_modules below must be able to find/remove a
+    # module even on a device with zero modules: entries left (e.g. every
+    # configured module for this device was just migrated/removed,
+    # exactly the scenario that motivated this).
     if [[ ${#configured_module_ids[@]} -gt 0 || -n "$enforce" ]]
     then
       if ! ROOT_FRAMEWORK="$(resolve_root_framework "$device_config" "$cli_root_framework" "$DEVICE_SERIAL")"
@@ -3452,6 +3387,76 @@ cmd_apply() {
       fi
     fi
 
+    build_install_plan "$device_config"
+
+    local proceed=1
+    if [[ ${#PLAN_PENDING[@]} -eq 0 ]]
+    then
+      log_ok "Nothing to install on $DEVICE_SERIAL ($PLAN_SKIP_COUNT already installed)"
+    else
+      print_install_plan "$DEVICE_SERIAL"
+
+      if [[ -z "$DRY_RUN" && -z "$assume_yes" ]]
+      then
+        local reply
+        read -rp "Install these ${#PLAN_PENDING[@]} app(s) on $DEVICE_SERIAL? [y/N] " reply
+        case "$reply" in
+          y|Y|yes|YES)
+            ;;
+          *)
+            log_step "Skipping install on $DEVICE_SERIAL"
+            proceed=""
+            ;;
+        esac
+      fi
+    fi
+
+    # Always runs unless the user explicitly declined the prompt above --
+    # install_app also does the state.disabled: convergence (see its
+    # comment) for every already-installed app, not just newly-installed
+    # ones, so this must run even when PLAN_PENDING is empty (nothing left
+    # to *install*, but there may still be an enable/disable to converge).
+    if [[ -n "$proceed" ]] && ! for_each_app "$device_config" install_app
+    then
+      overall_rc=1
+    fi
+
+    build_removal_plan "$device_config"
+
+    if [[ ${#REMOVAL_PLAN_PENDING[@]} -gt 0 ]]
+    then
+      print_removal_plan "$DEVICE_SERIAL"
+
+      local removal_proceed=1
+      if [[ -z "$DRY_RUN" && -z "$assume_yes" ]]
+      then
+        local removal_reply
+        read -rp "Uninstall these ${#REMOVAL_PLAN_PENDING[@]} app(s) on $DEVICE_SERIAL? [y/N] " removal_reply
+        case "$removal_reply" in
+          y|Y|yes|YES)
+            ;;
+          *)
+            log_step "Skipping removal on $DEVICE_SERIAL"
+            removal_proceed=""
+            ;;
+        esac
+      fi
+
+      if [[ -n "$removal_proceed" ]]
+      then
+        local removal_row
+        for removal_row in "${REMOVAL_PLAN_PENDING[@]}"
+        do
+          IFS=$'\t' read -r CURRENT_NAME CURRENT_PKG <<< "$removal_row"
+
+          if ! uninstall_app
+          then
+            overall_rc=1
+          fi
+        done
+      fi
+    fi
+
     if [[ -n "$obtainium_needed" ]] && ! sync_obtainium_repos "$device_config" "$DEVICE_SERIAL" "$cli_root_framework"
     then
       overall_rc=1
@@ -3459,12 +3464,14 @@ cmd_apply() {
 
     if [[ -n "$enforce" ]]
     then
-      if ! enforce_config "$device_config" "$DEVICE_SERIAL" "$DRY_RUN" "$assume_yes"
+      # Modules before apps here too, same ordering reasoning as the
+      # install/removal pass above.
+      if [[ -n "$module_root_resolved" ]] && ! enforce_modules "$device_config" "$DEVICE_SERIAL" "$ROOT_FRAMEWORK" "$DRY_RUN" "$assume_yes"
       then
         overall_rc=1
       fi
 
-      if [[ -n "$module_root_resolved" ]] && ! enforce_modules "$device_config" "$DEVICE_SERIAL" "$ROOT_FRAMEWORK" "$DRY_RUN" "$assume_yes"
+      if ! enforce_config "$device_config" "$DEVICE_SERIAL" "$DRY_RUN" "$assume_yes"
       then
         overall_rc=1
       fi
