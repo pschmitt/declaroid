@@ -551,7 +551,13 @@ split apps already have:
 - `apply --enforce` also uninstalls (same `remove` marker) any
   device-installed module with no matching `id:` entry anywhere in the
   config, the same "anything undeclared" semantics `--enforce` already
-  has for apps.
+  has for apps -- minus a small denylist (`is_module_plumbing_id` in the
+  script, the module-side equivalent of apps' GMS/AOSP one above) for
+  auto-generated companion modules a user would never configure directly,
+  currently just Zygisk Next's own `zn_magisk_compat` shim. Without it,
+  `--enforce` would uninstall it and Zygisk Next would just recreate it
+  the next time it runs, forever. `modules --full` applies the same
+  denylist to its own `extra` reporting.
 
 **Every module state change -- install, removal, enable, disable -- only
 takes effect on next boot for both frameworks**: `apply` doesn't reboot

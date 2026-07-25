@@ -4842,14 +4842,15 @@ list_extra_pkgs() {
 
 # Same idea as list_extra_pkgs, but for root modules: every module
 # actually present on the device (list_root_modules) with no matching
-# `id:` entry in the config. No is_system_plumbing_pkg-equivalent denylist
-# needed here -- unlike apps, there's no such thing as a preinstalled OEM
-# module, every module dir on a rooted device only got there because
-# someone (declaroid or otherwise) installed it. Prints id\tname rows (name
-# from the device's own module.prop, not the config -- there's no config
-# entry for an extra module by definition); no output means nothing extra.
-# Shared by `modules --full` (surfaces them, already did before this) and
-# `apply --enforce` (offers to uninstall them, new).
+# `id:` entry in the config, minus is_module_plumbing_id's own denylist
+# (auto-generated companion modules -- e.g. Zygisk Next's
+# `zn_magisk_compat` -- that a user would never configure directly and
+# that a root framework/other module just recreates on its own the moment
+# `--enforce` removes it). Prints id\tname rows (name from the device's
+# own module.prop, not the config -- there's no config entry for an extra
+# module by definition); no output means nothing extra. Shared by
+# `modules --full` (surfaces them, already did before this) and `apply
+# --enforce` (offers to uninstall them, new).
 list_extra_modules() {
   local config="$1"
   local device="$2"
@@ -4872,6 +4873,7 @@ list_extra_modules() {
   for row in "${device_rows[@]}"
   do
     IFS=$'\t' read -r did dname _dversion _denabled <<< "$row"
+    is_module_plumbing_id "$did" && continue
     [[ -n "${configured[$did]:-}" ]] && continue
 
     printf '%s\t%s\n' "$did" "$dname"
@@ -5166,6 +5168,11 @@ cmd_modules() {
           for drow in "${device_rows[@]}"
           do
             IFS=$'\t' read -r did dname dversion denabled <<< "$drow"
+            # See list_extra_modules' identical check -- an auto-generated
+            # companion module (Zygisk Next's zn_magisk_compat, etc.)
+            # isn't "extra" in any actionable sense, so don't clutter
+            # --full's report with it either.
+            is_module_plumbing_id "$did" && continue
             found=""
             for crow in "${configured_rows[@]}"
             do
@@ -5310,6 +5317,26 @@ is_system_plumbing_pkg() {
     com.google.android.apps.accessibility.voiceaccess | \
     com.google.android.apps.healthdata | \
     com.google.ar.core)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# Module ids that are auto-generated companions of another module or the
+# root framework itself, not something a user would ever declare directly
+# -- the module-side equivalent of is_system_plumbing_pkg above, same
+# best-effort/not-exhaustive spirit. Currently just Zygisk Next's own
+# "zn_magisk_compat" shim, which Zygisk Next auto-creates on a Magisk
+# device (to bridge original-Zygisk-API modules) and would otherwise
+# always show up as "extra"/unconfigured in list_extra_modules -- `apply
+# --enforce` would uninstall it, then Zygisk Next just recreates it the
+# next time it runs, uninstalled again on the next enforce, forever.
+is_module_plumbing_id() {
+  case "$1" in
+    zn_magisk_compat)
       return 0
       ;;
     *)

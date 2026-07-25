@@ -13,6 +13,7 @@ setup() {
   list_root_modules() {
     printf 'tracked-module\tTracked\t1.0\tyes\n'
     printf 'extra-module\tExtra\t2.0\tyes\n'
+    printf 'zn_magisk_compat\t{ZN Magisk Compat}\t1.0\tyes\n'
   }
 }
 
@@ -22,4 +23,14 @@ setup() {
 
   [ "${#lines[@]}" -eq 1 ]
   [ "$output" = $'extra-module\tExtra' ]
+}
+
+@test "list_extra_modules: is_module_plumbing_id denylist (zn_magisk_compat) is never reported as extra" {
+  # Regresses a real annoyance: apply --enforce uninstalled Zygisk Next's
+  # own auto-created zn_magisk_compat shim every single run, since Zygisk
+  # Next just recreates it the next time it runs -- forever.
+  run list_extra_modules "$(fixture list_extra_modules/config.yaml)" fake-device magisk
+  [ "$status" -eq 0 ]
+
+  [[ "$output" != *"zn_magisk_compat"* ]]
 }
