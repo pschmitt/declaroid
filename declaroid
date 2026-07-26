@@ -376,6 +376,16 @@ ${C_BOLD}Config schema:${C_RESET}
                                      # a directory (every *.apk directly inside it).
       url: <http(s) URL>            # required when store is url; a direct link to
                                      # a single apk file, fetched at install time.
+      sha256: <hex digest>          # optional (store: local/url only); verified
+                                     # against the resolved (local) or downloaded
+                                     # (url) apk file before install -- a mismatch
+                                     # fails the app (and, for url, drops the bad
+                                     # file from the cache so the next run
+                                     # re-downloads it instead of repeating the
+                                     # same failure). Requires path to resolve to
+                                     # exactly one file for store: local; a
+                                     # multi-file match (glob/dir) with sha256 set
+                                     # is an error, same reasoning as asset above.
       obtainium: true|false         # optional (store: github only); overrides
                                      # obtainium_auto_track: for just this one app --
                                      # true tracks it in Obtainium even with that
@@ -422,6 +432,14 @@ ${C_BOLD}Config schema:${C_RESET}
                                        # \`getprop\` (no args) round trip, cached for every
                                        # if:-gated entry in the same run -- configs with
                                        # no if: anywhere pay no cost for this at all.
+                                       # An expected value containing \`*\` is a glob
+                                       # (\`*\` = zero or more of anything, no other
+                                       # wildcards) instead of an exact match, e.g.
+                                       # ro.lineage.build.version: "23.*" to match any
+                                       # 23.x LineageOS build, or the bare sentinel "*"
+                                       # to match any non-empty value at all -- e.g. "any
+                                       # LineageOS build whatsoever" without pinning a
+                                       # version string that breaks on the next upgrade.
   obtainium:                                   # optional; repos for the Obtainium app itself
                                                  # to track (apply only; root not required, but
                                                  # used when available -- see below)
@@ -805,12 +823,52 @@ device_props_json() {
 # unrecognized `type:` simply never matches, the same lenient-by-default
 # treatment an unrecognized/mistyped getprop name already gets -- if:
 # blocks were never schema-validated before this and still aren't.
+#
+# An expected value containing `*` is a glob pattern rather than an exact
+# match: `*` stands for "zero or more of anything", every other character
+# matches itself literally (no `?`/`[...]` -- just the one wildcard).
+# `if: {ro.lineage.build.version: "23.*"}` matches "23.2", "23.10", etc. but
+# not "24.0"; the bare sentinel `if: {ro.lineage.build.version: "*"}` matches
+# any non-empty value at all, e.g. to gate on "any LineageOS build"
+# regardless of version, where pinning the exact version string would
+# silently stop matching the next time LineageOS is upgraded. A missing
+# getprop (absent from the device's `getprop` dump entirely) never matches
+# any glob, including the bare `*`; an explicitly empty value only fails to
+# match the bare `*` sentinel specifically (a real glob like "23.*" simply
+# can't match "" on its own literal-character terms, no special-casing
+# needed there). There's no way to match the literal string "*" itself as a
+# plain value -- no known getprop or config value is ever actually that.
 condition_matches() {
   local cond_json="$1"
   local props_json="$2"
   local config_json="${3:-{\}}"
 
   jq -e -n --argjson cond "$cond_json" --argjson props "$props_json" --argjson cfg "$config_json" '
+    def escape_regex:
+      gsub("\\\\"; "\\\\") |
+      gsub("\\."; "\\.") |
+      gsub("\\^"; "\\^") |
+      gsub("\\$"; "\\$") |
+      gsub("\\+"; "\\+") |
+      gsub("\\?"; "\\?") |
+      gsub("\\("; "\\(") |
+      gsub("\\)"; "\\)") |
+      gsub("\\["; "\\[") |
+      gsub("\\]"; "\\]") |
+      gsub("\\{"; "\\{") |
+      gsub("\\}"; "\\}") |
+      gsub("\\|"; "\\|");
+    def glob_to_regex: escape_regex | gsub("\\*"; ".*");
+    def glob_matches(actual; pattern):
+      if actual == null then false
+      elif pattern == "*" then (actual != "")
+      else (actual | test("^" + (pattern | glob_to_regex) + "$"))
+      end;
+    def scalar_matches(actual; expected):
+      if (expected | type) == "string" and (expected | contains("*"))
+      then glob_matches(actual; expected)
+      else actual == expected
+      end;
     def matches(cond):
       cond | to_entries | all(
         .key as $k | .value as $v |
@@ -819,12 +877,12 @@ condition_matches() {
         elif ($v | type) == "object" then
           (
             ($v.type // "prop") as $t |
-            if $t == "config" then ($cfg | getpath($k / ".")) == $v.value
-            elif $t == "prop" then ($props[$k] == $v.value)
+            if $t == "config" then scalar_matches($cfg | getpath($k / "."); $v.value)
+            elif $t == "prop" then scalar_matches($props[$k]; $v.value)
             else false
             end
           )
-        else ($props[$k] == $v)
+        else scalar_matches($props[$k]; $v)
         end
       );
     matches($cond)
@@ -878,6 +936,31 @@ filter_config_for_device() {
   do
     filtered_json="$(mktemp --suffix=.json)"
     yq -o=json ".$key // []" "$config" | jq --argjson props "$props" --argjson cfg "$cfg" '
+      def escape_regex:
+        gsub("\\\\"; "\\\\") |
+        gsub("\\."; "\\.") |
+        gsub("\\^"; "\\^") |
+        gsub("\\$"; "\\$") |
+        gsub("\\+"; "\\+") |
+        gsub("\\?"; "\\?") |
+        gsub("\\("; "\\(") |
+        gsub("\\)"; "\\)") |
+        gsub("\\["; "\\[") |
+        gsub("\\]"; "\\]") |
+        gsub("\\{"; "\\{") |
+        gsub("\\}"; "\\}") |
+        gsub("\\|"; "\\|");
+      def glob_to_regex: escape_regex | gsub("\\*"; ".*");
+      def glob_matches(actual; pattern):
+        if actual == null then false
+        elif pattern == "*" then (actual != "")
+        else (actual | test("^" + (pattern | glob_to_regex) + "$"))
+        end;
+      def scalar_matches(actual; expected):
+        if (expected | type) == "string" and (expected | contains("*"))
+        then glob_matches(actual; expected)
+        else actual == expected
+        end;
       def matches(cond):
         cond | to_entries | all(
           .key as $k | .value as $v |
@@ -886,12 +969,12 @@ filter_config_for_device() {
           elif ($v | type) == "object" then
             (
               ($v.type // "prop") as $t |
-              if $t == "config" then ($cfg | getpath($k / ".")) == $v.value
-              elif $t == "prop" then ($props[$k] == $v.value)
+              if $t == "config" then scalar_matches($cfg | getpath($k / "."); $v.value)
+              elif $t == "prop" then scalar_matches($props[$k]; $v.value)
               else false
               end
             )
-          else ($props[$k] == $v)
+          else scalar_matches($props[$k]; $v)
           end
         );
       map(select((.if // {}) | matches(.)))

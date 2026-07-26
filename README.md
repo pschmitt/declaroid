@@ -1142,6 +1142,46 @@ if:
     ro.product.manufacturer: acme
 ```
 
+An expected value containing `*` is a glob rather than an exact match: `*`
+stands for "zero or more of anything", every other character matches
+itself literally (no `?`/`[...]`, just the one wildcard). This is for props
+whose exact value legitimately varies but where only part of it (or just
+its presence at all) is the actual signal:
+
+```yaml
+if:
+  ro.lineage.build.version: "23.*"   # any 23.x LineageOS build, not 24.x
+```
+
+The bare sentinel `*` on its own matches *any* non-empty value, for when
+even a version prefix isn't stable enough -- e.g. `ro.lineage.version`
+embeds the build date and is unique per device, but
+`ro.lineage.build.version` (the LineageOS major/minor branch, e.g. `23.2`)
+is at least shared fleet-wide today. Pinning that exact string works until
+the fleet upgrades to the next LineageOS release, at which point the
+condition silently stops matching; `*` avoids that entirely:
+
+```yaml
+# imports/google.yaml -- disable LineageOS's own Etar in favor of Google
+# Calendar, on any LineageOS device regardless of which release it's on.
+apps:
+  - name: "Calendar (Etar/LineageOS)"
+    pkg: org.lineageos.etar
+    state:
+      installed: true
+      disabled: true
+    if:
+      ro.lineage.build.version: "*"
+```
+
+A missing getprop (absent from the device's `getprop` dump entirely) never
+matches any glob, including the bare `*`. An explicitly empty value only
+fails to match the bare `*` sentinel specifically -- a real glob like
+`23.*` simply can't match `""` on its own literal characters anyway, no
+special-casing needed there. There's no way to match the literal string
+`*` itself as a plain value -- no known getprop or config value is ever
+actually that.
+
 Evaluated per device, once per `apply`/`uninstall`/`diff`/`modules`
 invocation -- every property is fetched in a single `adb shell getprop`
 round trip (not one per property, not one per `if:`-gated entry) and reused

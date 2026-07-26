@@ -104,6 +104,67 @@ setup() {
   [ "$status" -eq 1 ]
 }
 
+@test "condition_matches: * wildcard matches any non-empty prop value" {
+  run condition_matches '{"ro.lineage.build.version":"*"}' '{"ro.lineage.build.version":"23.2"}'
+  [ "$status" -eq 0 ]
+  run condition_matches '{"ro.lineage.build.version":"*"}' '{"ro.lineage.build.version":"24.0"}'
+  [ "$status" -eq 0 ]
+}
+
+@test "condition_matches: * wildcard does not match a missing prop" {
+  run condition_matches '{"ro.lineage.build.version":"*"}' '{"ro.product.device":"clover"}'
+  [ "$status" -eq 1 ]
+}
+
+@test "condition_matches: * wildcard does not match an explicitly empty prop" {
+  run condition_matches '{"ro.lineage.build.version":"*"}' '{"ro.lineage.build.version":""}'
+  [ "$status" -eq 1 ]
+}
+
+@test "condition_matches: * wildcard works through the explicit type: prop form" {
+  run condition_matches '{"ro.lineage.build.version":{"type":"prop","value":"*"}}' '{"ro.lineage.build.version":"23.2"}'
+  [ "$status" -eq 0 ]
+  run condition_matches '{"ro.lineage.build.version":{"type":"prop","value":"*"}}' '{}'
+  [ "$status" -eq 1 ]
+}
+
+@test "condition_matches: * wildcard works through type: config" {
+  run condition_matches '{"root.framework":{"type":"config","value":"*"}}' '{}' '{"root":{"framework":"magisk"}}'
+  [ "$status" -eq 0 ]
+  run condition_matches '{"root.framework":{"type":"config","value":"*"}}' '{}' '{"root":{}}'
+  [ "$status" -eq 1 ]
+}
+
+@test "condition_matches: prefix glob (23.*) matches same-branch versions, not others" {
+  run condition_matches '{"ro.lineage.build.version":"23.*"}' '{"ro.lineage.build.version":"23.2"}'
+  [ "$status" -eq 0 ]
+  run condition_matches '{"ro.lineage.build.version":"23.*"}' '{"ro.lineage.build.version":"23.10"}'
+  [ "$status" -eq 0 ]
+  run condition_matches '{"ro.lineage.build.version":"23.*"}' '{"ro.lineage.build.version":"24.0"}'
+  [ "$status" -eq 1 ]
+}
+
+@test "condition_matches: prefix glob requires the literal dot, not any character" {
+  run condition_matches '{"ro.lineage.build.version":"23.*"}' '{"ro.lineage.build.version":"230"}'
+  [ "$status" -eq 1 ]
+}
+
+@test "condition_matches: prefix glob never matches a missing prop" {
+  run condition_matches '{"ro.lineage.build.version":"23.*"}' '{"ro.product.device":"clover"}'
+  [ "$status" -eq 1 ]
+}
+
+@test "condition_matches: glob metacharacters in the pattern outside * are escaped, not regex" {
+  # "1.0+beta" should only match that literal string plus anything after
+  # the *, never be interpreted as "1" optionally followed by "0", etc.
+  run condition_matches '{"v":"1.0+beta*"}' '{"v":"1.0+beta"}'
+  [ "$status" -eq 0 ]
+  run condition_matches '{"v":"1.0+beta*"}' '{"v":"1.0+beta2"}'
+  [ "$status" -eq 0 ]
+  run condition_matches '{"v":"1.0+beta*"}' '{"v":"10+beta"}'
+  [ "$status" -eq 1 ]
+}
+
 @test "filter_config_for_device: type: config filters on the device's own configured root.framework, not a getprop" {
   # getprop is still called once (config_has_conditions is file-wide, not
   # per-entry) but its value is irrelevant here -- every if: in this
@@ -173,6 +234,35 @@ setup() {
 
   run yq -r '.modules[].id' "$filtered"
   [ "${lines[0]}" = "always-module" ]
+  [ "${#lines[@]}" -eq 1 ]
+}
+
+@test "filter_config_for_device: * wildcard keeps the entry on a device that has the prop set" {
+  # shellcheck disable=SC2329
+  adb() {
+    [[ "$*" == *"shell getprop"* ]] && printf '[ro.lineage.build.version]: [23.2]\n'
+  }
+
+  run filter_config_for_device "$(fixture conditions/wildcard.yaml)" fake-lineage-device
+  [ "$status" -eq 0 ]
+
+  run yq -r '.apps[].name' "$output"
+  [ "${lines[0]}" = "Etar (LineageOS only)" ]
+  [ "${lines[1]}" = "Always" ]
+  [ "${#lines[@]}" -eq 2 ]
+}
+
+@test "filter_config_for_device: * wildcard drops the entry on a device without the prop" {
+  # shellcheck disable=SC2329
+  adb() {
+    [[ "$*" == *"shell getprop"* ]] && printf '[ro.product.device]: [ASUS_AI2302]\n'
+  }
+
+  run filter_config_for_device "$(fixture conditions/wildcard.yaml)" fake-non-lineage-device
+  [ "$status" -eq 0 ]
+
+  run yq -r '.apps[].name' "$output"
+  [ "${lines[0]}" = "Always" ]
   [ "${#lines[@]}" -eq 1 ]
 }
 

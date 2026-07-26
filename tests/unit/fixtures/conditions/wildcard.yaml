@@ -1,0 +1,9 @@
+device: test
+apps:
+  - name: "Etar (LineageOS only)"
+    pkg: org.lineageos.etar
+    if:
+      ro.lineage.build.version: "*"
+
+  - name: "Always"
+    pkg: com.example.always
