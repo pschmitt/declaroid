@@ -1704,6 +1704,17 @@ install_local() {
     return 1
   fi
 
+  if [[ -n "$CURRENT_SHA256" ]]
+  then
+    if [[ ${#apks[@]} -ne 1 ]]
+    then
+      log_error "$CURRENT_PKG: sha256 requires 'path' to resolve to exactly one file, found ${#apks[@]}"
+      return 1
+    fi
+
+    verify_sha256 "${apks[0]}" "$CURRENT_SHA256" "$CURRENT_PKG" || return 1
+  fi
+
   # No installer attribution here either -- same reason as install_github.
   install_apk_files "" "${apks[@]}"
 }
@@ -1772,19 +1783,14 @@ fetch_github_release() {
   fi
 }
 
-# Shared tail of install_github/install_url, after with_cache_lock has made
-# sure $cache_dir holds a cached-or-freshly-fetched download: find the
-# single cached APK (erroring loudly if the cache holds zero or more than
-# one -- a misconfigured 'asset' regex matching more than one release
-# asset, or some other unexpected extra file, rather than silently
-# installing the wrong one), then adb install -r it with the same
-# --user/-g threading every other single-APK install path in this file
-# uses. No -i installer attribution here: Android silently drops it unless
-# the claimed installer is a real, currently-installed package (tested --
-# a synthetic "declaroid.store.github" id is just ignored, ending up
-# installer=null same as passing no -i at all), and there's no existing
-# installed package either store could truthfully claim to be.
-install_single_cached_apk() {
+# Finds the single cached APK in $cache_dir, erroring loudly if it holds
+# zero or more than one -- a misconfigured 'asset' regex matching more than
+# one release asset, or some other unexpected extra file, rather than
+# silently installing the wrong one. Extracted out of
+# install_single_cached_apk so install_url's sha256 check (which needs the
+# resolved path before installing, not just installing it) can share the
+# same lookup instead of re-deriving it.
+resolve_single_cached_apk() {
   local cache_dir="$1"
   local -a apks
   mapfile -t apks < <(find "$cache_dir" -maxdepth 1 -iname '*.apk')
@@ -1795,13 +1801,45 @@ install_single_cached_apk() {
     return 1
   fi
 
+  printf '%s\n' "${apks[0]}"
+}
+
+# Verifies $file's sha256sum matches $expected (case-insensitive hex
+# compare) for a store: local/url app that pins a checksum via sha256: in
+# config. $pkg is only used for the error message.
+verify_sha256() {
+  local file="$1" expected="$2" pkg="$3"
+  local actual
+  actual="$(sha256sum "$file" | cut -d' ' -f1)"
+
+  if [[ "${actual,,}" != "${expected,,}" ]]
+  then
+    log_error "$pkg: sha256 mismatch for $(basename -- "$file") (expected ${expected,,}, got $actual)"
+    return 1
+  fi
+}
+
+# Shared tail of install_github/install_url, after with_cache_lock has made
+# sure $cache_dir holds a cached-or-freshly-fetched download: resolve the
+# single cached APK, then adb install -r it with the same --user/-g
+# threading every other single-APK install path in this file uses. No -i
+# installer attribution here: Android silently drops it unless the claimed
+# installer is a real, currently-installed package (tested -- a synthetic
+# "declaroid.store.github" id is just ignored, ending up installer=null
+# same as passing no -i at all), and there's no existing installed package
+# either store could truthfully claim to be.
+install_single_cached_apk() {
+  local cache_dir="$1"
+  local apk
+  apk="$(resolve_single_cached_apk "$cache_dir")" || return 1
+
   local -a user_args=()
   local user_val
   user_val="$(effective_target_user)"
   [[ -n "$user_val" ]] && user_args=(--user "$user_val")
   local -a grant_args=()
   [[ -n "${GRANT_PERMISSIONS:-}" ]] && grant_args=(-g)
-  adb -s "$DEVICE_SERIAL" install -r "${user_args[@]}" "${grant_args[@]}" "${apks[0]}"
+  adb -s "$DEVICE_SERIAL" install -r "${user_args[@]}" "${grant_args[@]}" "$apk"
 }
 
 install_github() {
@@ -1854,6 +1892,22 @@ install_url() {
   if ! with_cache_lock "$cache_dir" '*.apk' fetch_url_apk
   then
     return 1
+  fi
+
+  if [[ -n "$CURRENT_SHA256" ]]
+  then
+    local apk
+    apk="$(resolve_single_cached_apk "$cache_dir")" || return 1
+
+    if ! verify_sha256 "$apk" "$CURRENT_SHA256" "$CURRENT_PKG"
+    then
+      # Drop the bad file from the cache instead of leaving it there to
+      # fail the exact same check again on every future run -- a
+      # corrupted download or a genuinely tampered URL should be retried
+      # from scratch next time, not require a manual --force-download.
+      rm -f "$apk"
+      return 1
+    fi
   fi
 
   install_single_cached_apk "$cache_dir"
@@ -2444,7 +2498,7 @@ sync_app_disabled_state() {
 
 # Reads its per-app inputs from CURRENT_NAME/CURRENT_PKG/CURRENT_STORE/
 # CURRENT_REPO/CURRENT_ASSET/CURRENT_PATH/CURRENT_PROFILE/CURRENT_URL/
-# CURRENT_STATE_INSTALLED/CURRENT_STATE_DISABLED (set by for_each_app's read
+# CURRENT_SHA256/CURRENT_STATE_INSTALLED/CURRENT_STATE_DISABLED (set by for_each_app's read
 # loop) and its run-wide context from DEVICE_SERIAL/DRY_RUN/FORCE_DOWNLOAD/
 # TARGET_USER (set by cmd_apply before calling for_each_app). See AGENTS.md
 # for why -- this replaced a positional-argument chain that kept growing
@@ -3002,12 +3056,12 @@ run_meta_config() {
 }
 
 # Emits the configured apps as one row per app: name, pkg, store (defaulted),
-# repo, asset (defaulted), path, profile (defaulted), url, state.installed
+# repo, asset (defaulted), path, profile (defaulted), url, sha256, state.installed
 # (defaulted "true"), state.disabled (defaulted "false") -- joined with
 # $ROW_SEP (a single raw byte, ASCII Unit Separator 0x1F), not a tab and
 # not a printable character like U+00A7 either (see ROW_SEP's own comment
 # for why -- a real, locale-dependent bug was shipped with U+00A7 once).
-# Several of these fields (repo/asset/path/profile/url) are legitimately
+# Several of these fields (repo/asset/path/profile/url/sha256) are legitimately
 # empty for most apps, and bash's `read`
 # collapses consecutive *whitespace* IFS delimiters (tab included)
 # regardless of what IFS is set to, silently dropping empty fields and
@@ -3025,19 +3079,19 @@ app_rows() {
   yq -r '(.store // "gplay") as $ds |
     (.profile // "") as $dp |
     .apps[] |
-    [.name, .pkg, (.store // $ds), (.repo // ""), (.asset // "\\.apk$"), (.path // ""), (.profile // $dp), (.url // ""), ((.state.installed == false) | not), (.state.disabled == true)] | join("'"$ROW_SEP"'")' "$config"
+    [.name, .pkg, (.store // $ds), (.repo // ""), (.asset // "\\.apk$"), (.path // ""), (.profile // $dp), (.url // ""), (.sha256 // ""), ((.state.installed == false) | not), (.state.disabled == true)] | join("'"$ROW_SEP"'")' "$config"
 }
 
 # Calls app_fn (a zero-arg function; see install_app's comment) once per
 # configured app, with CURRENT_NAME/CURRENT_PKG/CURRENT_STORE/CURRENT_REPO/
-# CURRENT_ASSET/CURRENT_PATH/CURRENT_PROFILE/CURRENT_URL/
+# CURRENT_ASSET/CURRENT_PATH/CURRENT_PROFILE/CURRENT_URL/CURRENT_SHA256/
 # CURRENT_STATE_INSTALLED/CURRENT_STATE_DISABLED set for it to read.
 for_each_app() {
   local config="$1"
   local app_fn="$2"
   local failures=0
 
-  while IFS="$ROW_SEP" read -r CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE CURRENT_URL CURRENT_STATE_INSTALLED CURRENT_STATE_DISABLED <&3
+  while IFS="$ROW_SEP" read -r CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE CURRENT_URL CURRENT_SHA256 CURRENT_STATE_INSTALLED CURRENT_STATE_DISABLED <&3
   do
     # yq -r emits one blank line, not zero output, for `.apps[] | ... |
     # join(...)` over an empty/absent apps: list (same quirk documented on
@@ -3083,12 +3137,12 @@ build_install_plan() {
   local -a rows
   mapfile -t rows < <(app_rows "$config")
 
-  local row name pkg store _repo _asset _path _profile _url state_installed _state_disabled
+  local row name pkg store _repo _asset _path _profile _url _sha256 state_installed _state_disabled
   for row in "${rows[@]}"
   do
     # See for_each_app's comment on the same guard.
     [[ -z "$row" ]] && continue
-    IFS="$ROW_SEP" read -r name pkg store _repo _asset _path _profile _url state_installed _state_disabled <<< "$row"
+    IFS="$ROW_SEP" read -r name pkg store _repo _asset _path _profile _url _sha256 state_installed _state_disabled <<< "$row"
 
     [[ "$state_installed" == false ]] && continue
 
@@ -3113,11 +3167,11 @@ build_removal_plan() {
   local -a rows
   mapfile -t rows < <(app_rows "$config")
 
-  local row name pkg _store _repo _asset _path _profile _url state_installed _state_disabled
+  local row name pkg _store _repo _asset _path _profile _url _sha256 state_installed _state_disabled
   for row in "${rows[@]}"
   do
     [[ -z "$row" ]] && continue
-    IFS="$ROW_SEP" read -r name pkg _store _repo _asset _path _profile _url state_installed _state_disabled <<< "$row"
+    IFS="$ROW_SEP" read -r name pkg _store _repo _asset _path _profile _url _sha256 state_installed _state_disabled <<< "$row"
 
     if [[ "$state_installed" == false ]] && is_installed "$DEVICE_SERIAL" "$pkg"
     then
@@ -5090,7 +5144,7 @@ cmd_diff() {
   local -a devices
   mapfile -t devices <<< "$devices_raw"
 
-  local DEVICE_SERIAL CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE CURRENT_URL CURRENT_STATE_INSTALLED CURRENT_STATE_DISABLED device_config
+  local DEVICE_SERIAL CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE CURRENT_URL CURRENT_SHA256 CURRENT_STATE_INSTALLED CURRENT_STATE_DISABLED device_config
   for DEVICE_SERIAL in "${devices[@]}"
   do
     log_step "Target device: $(format_target_device "$DEVICE_SERIAL")"
@@ -5103,7 +5157,7 @@ cmd_diff() {
     {
       printf 'NAME\tPKG\tSTORE\tSTATUS\n'
       {
-        while IFS="$ROW_SEP" read -r CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE CURRENT_URL CURRENT_STATE_INSTALLED CURRENT_STATE_DISABLED <&3
+        while IFS="$ROW_SEP" read -r CURRENT_NAME CURRENT_PKG CURRENT_STORE CURRENT_REPO CURRENT_ASSET CURRENT_PATH CURRENT_PROFILE CURRENT_URL CURRENT_SHA256 CURRENT_STATE_INSTALLED CURRENT_STATE_DISABLED <&3
         do
           # See for_each_app's comment on the same guard.
           [[ -z "$CURRENT_PKG" ]] && continue

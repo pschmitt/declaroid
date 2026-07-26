@@ -13,7 +13,7 @@ setup() {
 
   local row
   row="$(printf '%s\n' "${lines[@]}" | grep "^A${ROW_SEP}com.example.a${ROW_SEP}")"
-  [ "$row" = "A${ROW_SEP}com.example.a${ROW_SEP}fdroid${ROW_SEP}${ROW_SEP}"'\.apk$'"${ROW_SEP}${ROW_SEP}0${ROW_SEP}${ROW_SEP}true${ROW_SEP}false" ]
+  [ "$row" = "A${ROW_SEP}com.example.a${ROW_SEP}fdroid${ROW_SEP}${ROW_SEP}"'\.apk$'"${ROW_SEP}${ROW_SEP}0${ROW_SEP}${ROW_SEP}${ROW_SEP}true${ROW_SEP}false" ]
 }
 
 @test "app_rows: an app's own store/repo/profile override the defaults" {
@@ -22,7 +22,7 @@ setup() {
 
   local row
   row="$(printf '%s\n' "${lines[@]}" | grep "^B${ROW_SEP}com.example.b${ROW_SEP}")"
-  [ "$row" = "B${ROW_SEP}com.example.b${ROW_SEP}github${ROW_SEP}example/b${ROW_SEP}"'\.apk$'"${ROW_SEP}${ROW_SEP}all${ROW_SEP}${ROW_SEP}true${ROW_SEP}false" ]
+  [ "$row" = "B${ROW_SEP}com.example.b${ROW_SEP}github${ROW_SEP}example/b${ROW_SEP}"'\.apk$'"${ROW_SEP}${ROW_SEP}all${ROW_SEP}${ROW_SEP}${ROW_SEP}true${ROW_SEP}false" ]
 }
 
 @test "app_rows: state.installed: false is reported, not coalesced away" {

@@ -833,12 +833,17 @@ metadata or authentication of any kind. Needs a `url` on the app entry:
   pkg: com.example.app
   store: url
   url: https://example.com/path/to/some-app.apk
+  sha256: 88fb0aee...11a5bcf3   # optional; verified against the downloaded file
 ```
 
 Like `github`, `pkg` still has to be the real Android package ID -- it's
 used for the already-installed check and as the cache key, not derived from
 the download. No split-APK support (single file only) and no `-i` installer
 attribution, same reasoning as `github`.
+
+If `sha256` is set, the downloaded file's checksum is verified before
+install; a mismatch fails the app and drops the bad file from the cache, so
+the next run re-downloads it instead of repeating the same failure forever.
 
 #### `local`
 
@@ -852,9 +857,15 @@ all. Needs a `path` on the app entry:
   path: /home/me/apks/some-app.apk        # a single file
   # path: /home/me/apks/some-app-*.apk    # or a glob matching several splits
   # path: /home/me/apks/some-app-splits/  # or a directory (every *.apk in it)
+  sha256: 88fb0aee...11a5bcf3             # optional, single file only, see below
 ```
 
 Like `gplay`, split APKs are deduped by checksum before `adb install-multiple`.
+
+`sha256`, if set, is verified against the resolved file before install --
+it requires `path` to resolve to exactly one file (a mismatch, or a
+multi-file match with `sha256` set, fails the app rather than guessing
+which file it was meant for).
 
 ### Caching
 
