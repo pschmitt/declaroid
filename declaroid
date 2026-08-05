@@ -4523,7 +4523,7 @@ search_stores() {
   fi
 }
 
-# Multi-select fzf picker offered as the "s"/"select" choice at an
+# Multi-select fzf picker offered as the "m"/"manual" choice at an
 # install/uninstall plan's [y/N/m] prompt (see e.g. cmd_apply's app-install
 # prompt) -- narrows a full pending list down to specific apps/modules
 # instead of an all-or-nothing yes/no. $rows are tab-separated plan rows
