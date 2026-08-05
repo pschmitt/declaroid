@@ -54,7 +54,7 @@ Install plan for 10.5.0.110:43411: 3 app(s) to install (1 already installed)
   Google Maps (com.google.android.apps.maps) [gplay]
   Aurora Store (com.aurora.store) [fdroid]
   JollyFin (dev.pschmitt.jollyfin) [github]
-Install these 3 app(s) on 10.5.0.110:43411? [y/N] y
+Install these 3 app(s) on 10.5.0.110:43411? [y/N/s] y
 INF Installing Google Maps (com.google.android.apps.maps) [gplay]
 OK Google Maps (com.google.android.apps.maps) installed
 INF Installing Aurora Store (com.aurora.store) [fdroid]
@@ -63,6 +63,11 @@ INF Installing JollyFin (dev.pschmitt.jollyfin) [github]
 OK JollyFin (dev.pschmitt.jollyfin) installed
 OK All apps processed successfully
 ```
+
+Answering `s`/select instead of `y` at any install/uninstall/`--enforce` prompt
+opens an `fzf` multi-select over that plan's apps/modules, letting you install
+or uninstall only some of them instead of all-or-nothing (Tab to toggle,
+Enter to confirm, Esc to cancel and skip the whole batch).
 
 See [`apps.yaml.example`](./apps.yaml.example) for a copy-pasteable starting
 point.
@@ -177,7 +182,7 @@ $ declaroid COMMAND [OPTIONS]
 | `--enforce` | apply | Also uninstall device apps that aren't in the config (prompts once per device); same as config `enforce: true` |
 | `-g, --grant, --grant-permissions` | apply | Pass `-g` to `adb install`/`install-multiple`, granting every runtime permission at install time instead of prompting later (gplay/github/url/local only, no-op for fdroid/izzyondroid); same as config `grant_permissions: true` |
 | `--reboot` | apply | Reboot the target device(s) at the end if any module(s) were installed (no-op otherwise) |
-| `-y, --yes, --noconfirm, --no-confirm` | apply, apply --enforce, uninstall, clear-cache | Skip the confirmation prompt |
+| `-y, --yes, --noconfirm, --no-confirm` | apply, apply --enforce, uninstall, clear-cache | Skip the confirmation prompt. Apply's app/module install/uninstall/`--enforce` prompts also accept `s`/select (`[y/N/s]`), which opens an fzf multi-select to narrow the batch down to specific apps/modules instead of all-or-nothing (requires `fzf`) |
 | `-v, --verbose` | apply | Also log each already-installed app as it's skipped, instead of just a count in the plan |
 | `-o, --output FILE\|DIR` | generate-config, download | generate-config: write to FILE instead of stdout; download: DIR to save the APK(s) in (default: `.`) |
 | `--system` | generate-config | Include system apps too (default: third-party only) |
@@ -617,7 +622,7 @@ INF Target device: MI_PAD_4 (clover) at 10.5.0.159:37819
 OK Nothing to install on 10.5.0.159:37819 (30 already installed)
 Module install plan for 10.5.0.159:37819: 1 module(s) to install
   Play Integrity Fix [INJECT] (playintegrityfix) [github]
-Install these 1 module(s) on 10.5.0.159:37819? [y/N] y
+Install these 1 module(s) on 10.5.0.159:37819? [y/N/s] y
 INF Installing module Play Integrity Fix [INJECT] (playintegrityfix) [github]
 INF Using latest release for KOWX712/PlayIntegrityFix
 INF Downloading PlayIntegrityFix_v4.7-1-inject-s.zip
