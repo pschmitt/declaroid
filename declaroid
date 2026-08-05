@@ -209,7 +209,7 @@ ${C_BOLD}Options:${C_RESET}
   ${C_YELLOW}-y, --yes, --noconfirm, --no-confirm${C_RESET}
                           (apply/apply --enforce/uninstall/clear-cache) Skip the confirmation prompt
                           (apply's app/module install/uninstall/--enforce prompts also accept
-                          "s"/select: [y/N/s], opening an fzf multi-select to narrow the
+                          "m"/manual: [y/N/m], opening an fzf multi-select to narrow the
                           batch down to specific apps/modules instead of all-or-nothing)
   ${C_YELLOW}-v, --verbose${C_RESET}           (apply only) Also log each already-installed app as it's
                           skipped, instead of just a count in the plan
@@ -2291,8 +2291,8 @@ sync_module_disabled_state() {
 # reasoning install_app documents.
 #
 # MODULE_INSTALL_ONLY_IDS is install_app's INSTALL_ONLY_PKGS, module-shaped
-# -- see its comment. Only non-empty after an "s"/select answer at the
-# module-install [y/N/s] prompt.
+# -- see its comment. Only non-empty after an "m"/manual answer at the
+# module-install [y/N/m] prompt.
 install_module_app() {
   local rc=0
 
@@ -2524,7 +2524,7 @@ sync_app_disabled_state() {
 #
 # INSTALL_ONLY_PKGS (an associative array, dynamic-scoped from cmd_apply
 # same as DEVICE_SERIAL/CURRENT_*) is only ever non-empty when the user
-# answered "s"/select at the app-install [y/N/s] prompt and fzf-picked a
+# answered "m"/manual at the app-install [y/N/m] prompt and fzf-picked a
 # subset of PLAN_PENDING -- every other app still runs the full pass below
 # it, just with the actual install attempt skipped, so state.disabled:
 # convergence keeps happening for apps the user didn't select too.
@@ -3450,7 +3450,7 @@ cmd_apply() {
   local -a PLAN_PENDING MODULE_PLAN_PENDING REMOVAL_PLAN_PENDING MODULE_REMOVAL_PLAN_PENDING
   local PLAN_SKIP_COUNT MODULE_PLAN_SKIP_COUNT MODULES_CHANGED_COUNT=0
   local device_config
-  # Populated only via the "s"/select answer at the install-plan [y/N/s]
+  # Populated only via the "m"/manual answer at the install-plan [y/N/m]
   # prompts (see fzf_select_rows) -- read by install_app/install_module_app
   # (see their comments) to gate which pkg/module actually gets installed,
   # reset empty at the top of each prompt below so a previous device's (or
@@ -3529,11 +3529,11 @@ cmd_apply() {
             if [[ -z "$DRY_RUN" && -z "$assume_yes" ]]
             then
               local module_reply
-              read -rp "Install these ${#MODULE_PLAN_PENDING[@]} module(s) on $DEVICE_SERIAL? [y/N/s] " module_reply
+              read -rp "Install these ${#MODULE_PLAN_PENDING[@]} module(s) on $DEVICE_SERIAL? [y/N/m] " module_reply
               case "$module_reply" in
                 y|Y|yes|YES)
                   ;;
-                s|S|select|SELECT)
+                m|M|manual|MANUAL)
                   check_deps fzf
                   local module_install_selection
                   if ! module_install_selection="$(fzf_select_rows "Select module(s) to install on $DEVICE_SERIAL" 1 "${MODULE_PLAN_PENDING[@]}")"
@@ -3574,11 +3574,11 @@ cmd_apply() {
             if [[ -z "$DRY_RUN" && -z "$assume_yes" ]]
             then
               local module_removal_reply
-              read -rp "Uninstall these ${#MODULE_REMOVAL_PLAN_PENDING[@]} module(s) on $DEVICE_SERIAL? [y/N/s] " module_removal_reply
+              read -rp "Uninstall these ${#MODULE_REMOVAL_PLAN_PENDING[@]} module(s) on $DEVICE_SERIAL? [y/N/m] " module_removal_reply
               case "$module_removal_reply" in
                 y|Y|yes|YES)
                   ;;
-                s|S|select|SELECT)
+                m|M|manual|MANUAL)
                   check_deps fzf
                   local module_removal_selection
                   if ! module_removal_selection="$(fzf_select_rows "Select module(s) to uninstall on $DEVICE_SERIAL" 1 "${MODULE_REMOVAL_PLAN_PENDING[@]}")"
@@ -3627,11 +3627,11 @@ cmd_apply() {
       if [[ -z "$DRY_RUN" && -z "$assume_yes" ]]
       then
         local reply
-        read -rp "Install these ${#PLAN_PENDING[@]} app(s) on $DEVICE_SERIAL? [y/N/s] " reply
+        read -rp "Install these ${#PLAN_PENDING[@]} app(s) on $DEVICE_SERIAL? [y/N/m] " reply
         case "$reply" in
           y|Y|yes|YES)
             ;;
-          s|S|select|SELECT)
+          m|M|manual|MANUAL)
             check_deps fzf
             local install_selection
             if ! install_selection="$(fzf_select_rows "Select app(s) to install on $DEVICE_SERIAL" 1 "${PLAN_PENDING[@]}")"
@@ -3662,7 +3662,7 @@ cmd_apply() {
     # comment) for every already-installed app, not just newly-installed
     # ones, so this must run even when PLAN_PENDING is empty (nothing left
     # to *install*, but there may still be an enable/disable to converge).
-    # A non-empty INSTALL_ONLY_PKGS (the [y/N/s] prompt's "s" path) doesn't
+    # A non-empty INSTALL_ONLY_PKGS (the [y/N/m] prompt's "m" path) doesn't
     # skip that convergence pass for unselected apps -- install_app itself
     # only consults INSTALL_ONLY_PKGS to decide whether to attempt the
     # actual install (see its comment).
@@ -3681,11 +3681,11 @@ cmd_apply() {
       if [[ -z "$DRY_RUN" && -z "$assume_yes" ]]
       then
         local removal_reply
-        read -rp "Uninstall these ${#REMOVAL_PLAN_PENDING[@]} app(s) on $DEVICE_SERIAL? [y/N/s] " removal_reply
+        read -rp "Uninstall these ${#REMOVAL_PLAN_PENDING[@]} app(s) on $DEVICE_SERIAL? [y/N/m] " removal_reply
         case "$removal_reply" in
           y|Y|yes|YES)
             ;;
-          s|S|select|SELECT)
+          m|M|manual|MANUAL)
             check_deps fzf
             local removal_selection
             if ! removal_selection="$(fzf_select_rows "Select app(s) to uninstall on $DEVICE_SERIAL" 1 "${REMOVAL_PLAN_PENDING[@]}")"
@@ -3812,11 +3812,11 @@ enforce_config() {
   if [[ -z "$assume_yes" ]]
   then
     local reply
-    read -rp "Uninstall these ${#extra_pkgs[@]} app(s) from $device? [y/N/s] " reply
+    read -rp "Uninstall these ${#extra_pkgs[@]} app(s) from $device? [y/N/m] " reply
     case "$reply" in
       y|Y|yes|YES)
         ;;
-      s|S|select|SELECT)
+      m|M|manual|MANUAL)
         check_deps fzf
         local enforce_selection
         if ! enforce_selection="$(fzf_select_rows "Select unconfigured app(s) to uninstall from $device" 1 "${extra_pkgs[@]}")"
@@ -3893,11 +3893,11 @@ enforce_modules() {
   if [[ -z "$assume_yes" ]]
   then
     local reply
-    read -rp "Uninstall these ${#extra_rows[@]} module(s) from $device? [y/N/s] " reply
+    read -rp "Uninstall these ${#extra_rows[@]} module(s) from $device? [y/N/m] " reply
     case "$reply" in
       y|Y|yes|YES)
         ;;
-      s|S|select|SELECT)
+      m|M|manual|MANUAL)
         check_deps fzf
         local enforce_module_selection
         if ! enforce_module_selection="$(fzf_select_rows "Select unconfigured module(s) to uninstall from $device" 2 "${extra_rows[@]}")"
@@ -4524,7 +4524,7 @@ search_stores() {
 }
 
 # Multi-select fzf picker offered as the "s"/"select" choice at an
-# install/uninstall plan's [y/N/s] prompt (see e.g. cmd_apply's app-install
+# install/uninstall plan's [y/N/m] prompt (see e.g. cmd_apply's app-install
 # prompt) -- narrows a full pending list down to specific apps/modules
 # instead of an all-or-nothing yes/no. $rows are tab-separated plan rows
 # exactly as produced by build_install_plan/build_removal_plan/
