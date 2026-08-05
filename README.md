@@ -40,11 +40,11 @@ apps:
     pkg: com.aurora.store
     store: fdroid
 
-  - name: Findroid Plus
-    pkg: dev.pschmitt.findroidplus
+  - name: JollyFin
+    pkg: dev.pschmitt.jollyfin
     store: github
-    repo: pschmitt/findroidplus
-    asset: 'phone-arm64-v8a-release\.apk$'
+    repo: pschmitt/jollyfin
+    asset: 'phone-libre-arm64-v8a-release\.apk$'
 ```
 
 ```console
@@ -53,14 +53,14 @@ INF Target device: Pixel_5 (redfin) at 10.5.0.110:43411
 Install plan for 10.5.0.110:43411: 3 app(s) to install (1 already installed)
   Google Maps (com.google.android.apps.maps) [gplay]
   Aurora Store (com.aurora.store) [fdroid]
-  Findroid Plus (dev.pschmitt.findroidplus) [github]
+  JollyFin (dev.pschmitt.jollyfin) [github]
 Install these 3 app(s) on 10.5.0.110:43411? [y/N] y
 INF Installing Google Maps (com.google.android.apps.maps) [gplay]
 OK Google Maps (com.google.android.apps.maps) installed
 INF Installing Aurora Store (com.aurora.store) [fdroid]
 OK Aurora Store (com.aurora.store) installed
-INF Installing Findroid Plus (dev.pschmitt.findroidplus) [github]
-OK Findroid Plus (dev.pschmitt.findroidplus) installed
+INF Installing JollyFin (dev.pschmitt.jollyfin) [github]
+OK JollyFin (dev.pschmitt.jollyfin) installed
 OK All apps processed successfully
 ```
 
@@ -707,8 +707,8 @@ not find a suitable release" error and no other symptom:
 
 ```yaml
 obtainium:
-  - pkg: dev.pschmitt.findroidplus
-    url: "https://github.com/pschmitt/findroidplus"
+  - pkg: dev.pschmitt.jollyfin
+    url: "https://github.com/pschmitt/jollyfin"
     settings:
       includePrereleases: true
 ```
@@ -730,10 +730,10 @@ it even with the default on:
 
 ```yaml
 apps:
-  - name: "Findroid+"
-    pkg: dev.pschmitt.findroidplus
+  - name: "JollyFin"
+    pkg: dev.pschmitt.jollyfin
     store: github
-    repo: "pschmitt/findroidplus"
+    repo: "pschmitt/jollyfin"
     obtainium: false   # e.g. already tracked with custom settings: below
 ```
 
