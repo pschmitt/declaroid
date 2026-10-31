@@ -1,5 +1,10 @@
 # Agent Guide
 
+## Private infrastructure details
+
+Do not include private hostnames, device identifiers, network addresses or topology here. Use placeholders and consult the private `brkn-infra` skill for specific host or device details.
+
+
 ## What this is
 
 `declaroid` is a single bash script (repo root, no extension) that installs
@@ -550,10 +555,10 @@ incomplete change, not a follow-up.
   network device, not a *hardware* identity -- confirmed live, not assumed,
   and it broke real usage (`--all-devices`/`--bulk` double-processing the
   same physical tablet), not just a theoretical gap.** A wireless-adb
-  tablet was simultaneously reachable as both `10.5.0.159:35036` (raw IP)
-  and `mi-pad-4.lan:35036` (mDNS hostname); `adb devices -l` lists both as
+  tablet was simultaneously reachable as both `<private-ip>:35036` (raw IP)
+  and `<private-domain>:35036` (mDNS hostname); `adb devices -l` lists both as
   independent devices, and `resolve_devices`'s substring query matching
-  (e.g. `clover`, the codename) had no way to know they're the same
+  (e.g. `<android-device>`, the codename) had no way to know they're the same
   physical unit. `getprop ro.serialno`/`ro.boot.serialno` against each
   confirmed the real fix target: both endpoints returned the identical
   `dcd9de41`. `real_device_serial`/`dedupe_matched_devices` resolve and
@@ -885,7 +890,7 @@ incomplete change, not a follow-up.
   implying it's instant.
 - **Does NOT actually require root -- this was the original assumption
   going in, and it was wrong, corrected only after testing it live
-  against a real non-rooted device (zf10, stock `user` build).**
+  against a real non-rooted device (<android-device>, stock `user` build).**
   `run-as` was tried first and refuses outright there ("package not
   debuggable": Obtainium's release APK isn't debuggable, and `user`
   builds only allow `run-as` for debuggable/profileable apps or on a
@@ -947,14 +952,14 @@ incomplete change, not a follow-up.
   since this mirrors modules' own "install if missing, no drift
   convergence" behavior, not a special-cased limitation just for this
   feature.
-- **Live-verified end to end against a real device (mi pad 4, `magisk`,
+- **Live-verified end to end against a real device (<tablet>, `magisk`,
   brand-new empty Obtainium install)**, not just `bash -n`/shellcheck:
   `--dry-run` correctly distinguished an already-tracked pkg (`SKP ...
   already tracked`) from a new one (`would seed Obtainium tracking for
   ...`); a real run wrote the JSON with correct content, `660` perms, and
   ownership matching the app's actual UID/GID (confirmed via `stat`); a
   second real run correctly no-op'd (`SKP` for both); and the same config
-  against a non-rooted device (zf10) correctly skipped with `OK Root not
+  against a non-rooted device (<android-device>) correctly skipped with `OK Root not
   enabled/detected on ..., skipping configured Obtainium repo(s)` rather
   than erroring.
 - **Two real bugs found by the user hitting them for real, both fixed and
@@ -1193,11 +1198,11 @@ incomplete change, not a follow-up.
   **Getting the getprop-key/condition value schema right required checking
   a real distinguishing property against real hardware, not guessing**:
   `ro.product.device` (also mirrored by `ro.build.product`) returns
-  `redfin` on px5 (Pixel 5) and `clover` on mp4 (Mi Pad 4) -- confirmed via
+  `<android-device>` on <android-device> (<phone>) and `<android-device>` on <android-device> (<tablet>) -- confirmed via
   `adb shell getprop` against both live devices before writing the actual
   `imports/root.yaml` APatch/Magisk example that motivated this feature in
-  the first place (APatch works on px5, fails to patch mp4's boot.img at
-  all -- kernel probably compiled without KALLSYMS -- so mp4 needs Magisk
+  the first place (APatch works on <android-device>, fails to patch <android-device>'s boot.img at
+  all -- kernel probably compiled without KALLSYMS -- so <android-device> needs Magisk
   instead, previously handled by two separate, un-DRY per-device `apps:`
   entries rather than one shared conditional one).
 
