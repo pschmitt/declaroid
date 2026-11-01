@@ -1069,6 +1069,8 @@ incomplete change, not a follow-up.
   unfiltered, it doesn't error on ambiguity.
 
 ## Testing / CI
+Before changing GitHub Actions, check whether [pschmitt/ci-workflows](https://github.com/pschmitt/ci-workflows) provides a reusable workflow or action. Preserve the existing workflow behavior and check coverage; use `@main` for shared workflow or action references.
+
 
 - **`nix develop`** provides everything needed to lint/test locally:
   `shellcheck`, `nixfmt`, `statix`, `actionlint`, `bats`, plus declaroid's
