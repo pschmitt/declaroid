@@ -1114,12 +1114,12 @@ Before changing GitHub Actions, check whether [pschmitt/ci-workflows](https://gi
   real; don't point it at a device with anything you care about still on
   it. (This is exactly why CI runs it against a disposable emulator,
   never real hardware.)
-- **`.github/workflows/` is six separate workflow files, not one job with
-  many steps** -- `shellcheck.yml`, `actionlint.yml`, `nixfmt.yml`,
-  `statix.yml`, `unit-tests.yml` (each `nix build`s the matching flake
+- **`.github/workflows/` is five separate workflow files, not one job with
+  many steps** -- `shellcheck.yml`, `actionlint.yml`, `nix-lint.yaml`,
+  `unit-tests.yml` (each `nix build`s the matching flake
   `check`, or runs the matching formatter/linter directly), and `e2e.yml`
   (boots a real AVD via `reactivecircus/android-emulator-runner`, `nix
-  build`s `declaroid` + `bats`, then runs `tests/e2e` against it). All six
+  build`s `declaroid` + `bats`, then runs `tests/e2e` against it). All five
   run on every push/PR, independently -- deliberately not gated behind
   each other (no cross-file `needs:`; GitHub Actions can't express that
   across separate workflow files without a slower `workflow_run` trigger
