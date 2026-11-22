@@ -15,6 +15,15 @@
       ];
     in
     {
+      # Circus builds the emulator's inputs and the existing flake checks.
+      hydraJobs.x86_64-linux = {
+        packages = {
+          inherit (self.packages.x86_64-linux) declaroid;
+          bats = nixpkgs.legacyPackages.x86_64-linux.bats;
+        };
+        checks = self.checks.x86_64-linux;
+      };
+
       packages = forAllSystems (
         system:
         let
