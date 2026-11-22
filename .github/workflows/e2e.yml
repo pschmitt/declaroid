@@ -10,9 +10,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: cachix/install-nix-action@v31
+      - uses: pschmitt/ci-workflows/.github/actions/nix-setup@main
         with:
-          extra_nix_config: |
+          extra-conf: |
             experimental-features = nix-command flakes
 
       - name: Build declaroid and bats
