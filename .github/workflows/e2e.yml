@@ -1,24 +1,52 @@
 name: e2e
+run-name: ${{ github.event_name == 'workflow_dispatch' && inputs.circus_pr_number != '' && format('Circus PR E2E {0}', inputs.circus_pr_sha) || 'e2e' }}
 
 on:
   push:
   pull_request:
+  status:
+  workflow_dispatch:
+    inputs:
+      circus_pr_number:
+        description: Trusted pull request number
+        type: string
+        default: ""
+      circus_pr_sha:
+        description: Exact trusted pull request head
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: read
 
 jobs:
   e2e:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'status' && github.event.context == 'circus/artifacts' && github.event.state == 'success' && github.event.sha == github.sha) }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: pschmitt/ci-workflows/.github/actions/nix-setup@main
+      - name: Verify Circus artifacts
+        if: ${{ github.event_name == 'status' || inputs.circus_pr_number != '' }}
+        uses: pschmitt/ci-workflows/.github/actions/verify-circus-artifacts@main
         with:
-          extra-conf: |
-            experimental-features = nix-command flakes
+          pr-number: ${{ inputs.circus_pr_number }}
+          pr-sha: ${{ inputs.circus_pr_sha }}
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.circus_pr_sha || github.sha }}
+          persist-credentials: false
 
-      - name: Build declaroid and bats
+      - uses: pschmitt/ci-workflows/.github/actions/nix-niks3@main
+        with:
+          s3-store: ${{ secrets.NIKS3_S3_STORE }}
+          s3-access-key: ${{ secrets.NIKS3_S3_ACCESS_KEY }}
+          s3-secret-key: ${{ secrets.NIKS3_S3_SECRET_KEY }}
+
+      - name: Fetch Circus-built declaroid and bats
         run: |
-          nix build .#declaroid -o result-declaroid
-          nix build nixpkgs#bats -o result-bats
+          nix --option max-jobs 0 --option builders '' --option fallback false --option allow-import-from-derivation false build '.#declaroid' -o result-declaroid
+          nix --option max-jobs 0 --option builders '' --option fallback false --option allow-import-from-derivation false build '.#hydraJobs.x86_64-linux.packages.bats' -o result-bats
           echo "$PWD/result-bats/bin" >> "$GITHUB_PATH"
           echo "DECLAROID_BIN=$PWD/result-declaroid/bin/declaroid" >> "$GITHUB_ENV"
 
